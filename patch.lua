@@ -15,11 +15,12 @@ M.state = {
     instrs = nil,
     proto_idx = 1,
     dirty = false,
+    last_src = nil,
+    last_source_kind = nil,
 }
 
 local active_hooks = {}
 local last_applied = nil
-local last_src = nil
 
 local function u32_bytes(v)
     return string.char(
@@ -151,10 +152,14 @@ function M.load_script(name)
     st.proto_idx = 1
     st.instrs = parser.iter_instrs(parsed.protos[1])
     st.dirty = false
+    st.last_src = nil
+    st.last_source_kind = nil
     if BC.modules.panel and BC.modules.panel.render_all then
         BC.modules.panel.render_all()
     end
-    console.log("loaded " .. s:GetFullName() .. " (v" .. parsed.version .. ", scheme=" .. (parsed.scheme or "identity") .. ", " .. #bc .. "b)", C.ok)
+    console.log("loaded " .. s:GetFullName() .. " (v" .. parsed.version
+        .. ", scheme=" .. (parsed.scheme or "identity")
+        .. ", " .. #bc .. "b)", C.ok)
 end
 
 function M.list_scripts()
@@ -188,7 +193,6 @@ function M.list_held()
     end
 end
 
--- Декомпиляция текущего прототипа
 function M.decompile_current()
     local st = M.state
     if not st or not st.parsed or not st.instrs then
@@ -196,37 +200,47 @@ function M.decompile_current()
     end
     local proto = st.parsed.protos[st.proto_idx]
     if not decompile or not decompile.from_proto then
-        return nil, "no decompiler module"
+        return nil, "no decompiler"
     end
     local ok, src = pcall(decompile.from_proto, proto, st.instrs, nil, nil, nil)
     if not ok then return nil, tostring(src) end
     return src
 end
 
--- Декомпиляция всего скрипта
 function M.decompile_full()
     local st = M.state
-    if not st or not st.parsed then return nil, "no script loaded" end
-    if not decompile or not decompile.full_script then
-        return nil, "no full_script in decompiler"
+    if not st or not st.parsed or not st.working then
+        return nil, "no script loaded"
     end
-    local ok, src, err = pcall(decompile.full_script, st.parsed)
+    if not decompile or not decompile.decompile_best then
+        return nil, "no decompiler"
+    end
+    local src, kind, err = decompile.decompile_best(st.working, st.parsed)
+    if not src then return nil, tostring(err) end
+    st.last_src = src
+    st.last_source_kind = kind
+    return src, nil, kind
+end
+
+function M.decompile_local()
+    local st = M.state
+    if not st or not st.parsed then return nil, "no script loaded" end
+    if not decompile or not decompile.full_script_local then
+        return nil, "no local decompiler"
+    end
+    local ok, src = pcall(decompile.full_script_local, st.parsed)
     if not ok then return nil, tostring(src) end
-    if not src then return nil, tostring(err or "unknown") end
-    last_src = src
     return src
 end
 
--- Применение изменений
+-- Применение
 function M.apply_edit(script, new_bytes)
     local C = console.colors()
     local cl = getscriptclosure(script)
     if not cl then return false, "no closure" end
 
-    -- основной путь: декомпилировать, загрузить через loadstring, hookfunction
-    local src, err = M.decompile_full()
+    local src, _, kind = M.decompile_full()
     if not src then
-        -- fallback: loadbytecode
         if typeof(loadbytecode) == "function" then
             local ok, fn = pcall(loadbytecode, new_bytes)
             if ok and fn then
@@ -237,16 +251,48 @@ function M.apply_edit(script, new_bytes)
                 end
             end
         end
-        return false, "decompile failed: " .. tostring(err)
+        return false, "decompile failed: " .. tostring(kind)
     end
 
-    -- компилируем
+    console.log("apply: source from " .. tostring(kind) .. " (" .. #src .. "b)", C.dim)
+
     local fn, load_err = loadstring(src, "@" .. script.Name)
+
+    if not fn then
+        -- фабрика upvalues
+        local info_ok, info = pcall(debug.getinfo, cl)
+        local nups = (info_ok and info and info.nups) or 0
+        if nups > 0 then
+            local params = {}
+            for i = 1, nups do
+                params[#params + 1] = "upval" .. (i - 1)
+            end
+            local wrapped = "return function(" .. table.concat(params, ", ") .. ")\n"
+                .. src .. "\nend"
+            local factory, wrap_err = loadstring(wrapped, "@" .. script.Name .. "_factory")
+            if factory then
+                local ups = {}
+                for i = 1, nups do
+                    local _, val = debug.getupvalue(cl, i)
+                    ups[i] = val
+                end
+                local ok_call, made = pcall(factory, table.unpack(ups))
+                if ok_call and made then
+                    fn = made
+                else
+                    return false, "factory call failed: " .. tostring(made)
+                end
+            else
+                return false, "loadstring: " .. tostring(load_err)
+                    .. " | wrapper: " .. tostring(wrap_err)
+            end
+        end
+    end
+
     if not fn then
         return false, "compile error: " .. tostring(load_err)
     end
 
-    -- применяем через hookfunction
     if typeof(hookfunction) ~= "function" then
         return false, "hookfunction unavailable"
     end
