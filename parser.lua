@@ -129,11 +129,13 @@ local function parse_impl(data)
     local protos = {}
 
     for i = 1, pcount do
-        local proto_size, proto_start = 0, pos
+        -- ИСПРАВЛЕНО: proto_start устанавливается ПОСЛЕ чтения proto_size
+        local proto_size = 0
         if version >= 12 then
             proto_size, pos = rd_var(data, pos)
             if not proto_size then return nil, "eof@protosize" end
         end
+        local proto_start = pos
 
         local pr = {}
         pr.maxstack, pos = rd_u8(data, pos)
@@ -337,7 +339,6 @@ function M.parse(data)
     return result
 end
 
--- ИСПРАВЛЕНО: шаг = длина инструкции
 function M.iter_instrs(pr)
     local list = {}
     local i = 1
@@ -361,7 +362,6 @@ function M.iter_instrs(pr)
             byte_offset = pr.code_offset + (i - 1) * 4,
             length = two and 2 or 1,
         }
-        -- КРИТИЧНО: здесь был баг i = i + 2
         i = i + (two and 2 or 1)
     end
     return list
