@@ -28,7 +28,7 @@ local C = {
     suggest_bg = px(28, 28, 30),
 }
 
-local FONT = Enum.Font.Code
+local FONT = Enum.Font.Arcade
 local TSIZE = 14
 
 local MAX_LOG = 5000
@@ -138,6 +138,7 @@ local function make_suggestion_row(text, subtitle, on_click)
     row.Text = ""
     row.AutoButtonColor = false
     row.TextXAlignment = Enum.TextXAlignment.Left
+    row.ZIndex = 1
     row.Parent = suggest_scroll
 
     local main_lbl = Instance.new("TextLabel")
@@ -150,7 +151,7 @@ local function make_suggestion_row(text, subtitle, on_click)
     main_lbl.TextSize = 13
     main_lbl.TextXAlignment = Enum.TextXAlignment.Left
     main_lbl.TextYAlignment = Enum.TextYAlignment.Center
-    main_lbl.TextTruncate = Enum.TextTruncate.AtEnd
+    main_lbl.ZIndex = 2
     main_lbl.Parent = row
 
     if subtitle and subtitle ~= "" then
@@ -165,7 +166,7 @@ local function make_suggestion_row(text, subtitle, on_click)
         sub.TextSize = 12
         sub.TextXAlignment = Enum.TextXAlignment.Right
         sub.TextYAlignment = Enum.TextYAlignment.Center
-        sub.TextTruncate = Enum.TextTruncate.AtEnd
+        sub.ZIndex = 2
         sub.Parent = row
     end
 
@@ -192,6 +193,7 @@ local function show_suggestions(rows)
     local max_visible = 6
     local shown = math.min(#rows, max_visible)
     suggest_scroll.CanvasSize = UDim2.new(0, 0, 0, #rows * 26)
+    suggest_scroll.AutomaticCanvasSize = Enum.AutomaticSize.None
     suggest_frame.Size = UDim2.new(1, 0, 0, shown * 26 + 4)
     suggest_frame.Visible = true
 end
@@ -293,6 +295,7 @@ function M.start(bc)
     sg.Name = "Console"
     sg.ResetOnSpawn = false
     sg.IgnoreGuiInset = true
+    sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
     sg.Parent = gui_root
 
     main = Instance.new("Frame")
@@ -337,7 +340,7 @@ function M.start(bc)
     hbar.Position = UDim2.new(0.5, 0, 0.5, 0)
     hbar.BackgroundColor3 = px(255, 255, 255)
     hbar.BorderSizePixel = 0
-    hbar.ZIndex = 52
+    hbar.ZIndex = 55
     hbar.Parent = minBtn
 
     vbar = Instance.new("Frame")
@@ -347,10 +350,9 @@ function M.start(bc)
     vbar.BackgroundColor3 = px(255, 255, 255)
     vbar.BorderSizePixel = 0
     vbar.Visible = false
-    vbar.ZIndex = 52
+    vbar.ZIndex = 55
     vbar.Parent = minBtn
 
-    -- suggest_frame как дочерний main
     suggest_frame = Instance.new("Frame")
     suggest_frame.Size = UDim2.new(1, 0, 0, 0)
     suggest_frame.Position = UDim2.new(0, 0, 1, 2)
@@ -370,6 +372,7 @@ function M.start(bc)
     suggest_scroll.ScrollBarThickness = 4
     suggest_scroll.ScrollBarImageColor3 = C.border
     suggest_scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    suggest_scroll.AutomaticCanvasSize = Enum.AutomaticSize.None
     suggest_scroll.ZIndex = 71
     suggest_scroll.Parent = suggest_frame
 
@@ -453,7 +456,8 @@ function M.start(bc)
         if enter then
             submit()
         else
-            task.delay(0.2, function()
+            task.defer(function()
+                task.wait(0.1)
                 if not suggest_clicked then
                     hide_suggestions()
                 end
