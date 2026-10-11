@@ -1,5 +1,4 @@
--- BC Editor loader v0.1.0
--- Замени USERNAME/REPO на свои
+-- BC Editor loader v0.2.1
 
 local BASE = "https://raw.githubusercontent.com/SUUUUUS00000/Console/main/"
 
@@ -10,12 +9,13 @@ local MODULES = {
     "names",
     "varflow",
     "ssa",
+    "expr",
     "cfgs",
     "patch",
     "panel",
 }
 
-local BC = { version = "0.1.0", modules = {}, base = BASE }
+local BC = { version = "0.2.1", modules = {}, base = BASE }
 
 print("[BC] loading from " .. BASE)
 
@@ -52,7 +52,6 @@ for i, name in ipairs(MODULES) do
     print(("[%d/%d] %s OK"):format(i, #MODULES, name))
 end
 
--- Связываем модули
 for _, name in ipairs(MODULES) do
     local mod = BC.modules[name]
     if mod and type(mod.init) == "function" then
@@ -64,7 +63,6 @@ for _, name in ipairs(MODULES) do
     end
 end
 
--- Стартуем GUI
 if BC.modules.console and BC.modules.console.start then
     BC.modules.console.start(BC)
 end
