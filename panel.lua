@@ -1,889 +1,590 @@
 local M = {}
-M.name = "panel"
+M.name = "console"
 
 local BC
-local console, parser, patch, decompile
-
-local C
-local gui_root
-local p_sg
-local bp
-local header_info, status_dot
-local left_pane, left_scroll
-local right_pane
-local right_gutter, right_gutter_inner
-local right_view_frame, right_view_scroll, right_view_content
-local right_edit_frame, right_edit_scroll, right_edit_display, right_edit_box, right_edit_cursor
-local footer
-local btn_decompile, btn_edit, btn_revert, btn_exit, btn_save
-
-local mode = "view"
-local cached_src = nil
-local cached_for_bytecode = nil
-local is_dirty = false
-local loading_edit = false
-local is_focused = false
-
-local dragOn, dragStart, dragPos, dragFrame, dragMoved
-local DRAG_THRESHOLD = 6
-
 local u = game:GetService("UserInputService")
-local cam = workspace.CurrentCamera
-local textService = game:GetService("TextService")
-
---=====================================================================
--- FE PALETTE
---=====================================================================
+local t = game:GetService("TweenService")
 
 local function px(r, g, b)
     return Color3.fromRGB(r, g, b)
 end
 
-local P = {
-    bg         = px(30, 30, 30),
-    topbar     = px(37, 37, 38),
-    editor     = px(24, 24, 24),
-    gutter     = px(35, 35, 38),
-    gutter_ln  = px(133, 133, 133),
-    button     = px(55, 55, 58),
-    button_pri = px(0, 122, 204),
-    border     = px(80, 80, 80),
-    txt        = px(220, 220, 220),
-    title      = px(200, 200, 200),
-    dim        = px(140, 140, 145),
-    hint       = px(85, 85, 90),
-    ok         = px(120, 200, 120),
-    warn       = px(230, 180, 90),
-    err        = px(230, 95, 95),
+local C = {
+    bg     = px(30, 30, 30),
+    bar    = px(37, 37, 38),
+    input  = px(24, 24, 24),
+    out    = px(24, 24, 24),
+    border = px(80, 80, 80),
+    txt    = px(220, 220, 220),
+    dim    = px(140, 140, 145),
+    hint   = px(85, 85, 90),
+    accent = px(86, 156, 214),
+    ok     = px(120, 200, 120),
+    err    = px(230, 95, 95),
+    warn   = px(230, 180, 90),
+    hex    = px(200, 200, 200),
+    button = px(55, 55, 58),
+    button_hover = px(72, 72, 78),
+    suggest_bg = px(28, 28, 30),
 }
 
 local FONT = Enum.Font.Arcade
 local TSIZE = 14
-local LINE_H = 14
 
---=====================================================================
--- LUA HIGHLIGHTING (FE COLORS)
---=====================================================================
+local MAX_LOG = 5000
+local logCount = 0
+local min = false
+local dragOn, dragStart, dragPos, dragFrame
+local commands = {}
+local gui_root, sg
+local main, inp, minBtn, hbar, vbar
+local panel, hintBar, hl, out, sb
 
-local KEYWORDS = {
-    ["and"]=1,["break"]=1,["do"]=1,["else"]=1,["elseif"]=1,["end"]=1,["false"]=1,
-    ["for"]=1,["function"]=1,["if"]=1,["in"]=1,["local"]=1,["nil"]=1,["not"]=1,
-    ["or"]=1,["repeat"]=1,["return"]=1,["then"]=1,["true"]=1,["until"]=1,
-    ["while"]=1,["continue"]=1,["export"]=1,["type"]=1,
-}
-
-local BUILTINS = {
-    ["game"]=1,["workspace"]=1,["script"]=1,["task"]=1,["print"]=1,["warn"]=1,
-    ["error"]=1,["assert"]=1,["pcall"]=1,["xpcall"]=1,["require"]=1,["spawn"]=1,
-    ["wait"]=1,["delay"]=1,["tick"]=1,["time"]=1,["typeof"]=1,
-    ["pairs"]=1,["ipairs"]=1,["next"]=1,["select"]=1,["unpack"]=1,
-    ["rawget"]=1,["rawset"]=1,["rawequal"]=1,["rawlen"]=1,
-    ["setmetatable"]=1,["getmetatable"]=1,
-    ["tostring"]=1,["tonumber"]=1,
-    ["Instance"]=1,["Vector3"]=1,["Vector2"]=1,["CFrame"]=1,["Color3"]=1,
-    ["UDim2"]=1,["UDim"]=1,["TweenInfo"]=1,["Enum"]=1,
-    ["shared"]=1,["_G"]=1,["_VERSION"]=1,
-    ["vector"]=1,["buffer"]=1,["bit32"]=1,["utf8"]=1,
-}
-
-local HL = {
-    keyword = "#569CD6",
-    string  = "#CE9178",
-    number  = "#B5CEA8",
-    comment = "#6A9955",
-    ident   = "#DCDCDC",
-    builtin = "#4EC9B0",
-    op      = "#DCDCDC",
-}
-
-local function is_ws(c)
-    return c == " " or c == "\t" or c == "\n" or c == "\r"
-end
-
-local function is_digit(c)
-    return c >= "0" and c <= "9"
-end
-
-local function is_alpha(c)
-    return (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or c == "_"
-end
-
-local function is_alnum(c)
-    return is_alpha(c) or is_digit(c)
-end
-
-local function tokenize(src)
-    local tokens = {}
-    local i, n = 1, #src
-    while i <= n do
-        local c = src:sub(i, i)
-        if is_ws(c) then
-            local j = i
-            while j <= n and is_ws(src:sub(j, j)) do j = j + 1 end
-            tokens[#tokens + 1] = {t = "ws", v = src:sub(i, j - 1)}
-            i = j
-        elseif c == "-" and src:sub(i + 1, i + 1) == "-" then
-            if src:sub(i, i + 3) == "--[[" then
-                local j = src:find("]]", i + 4, true)
-                if j then
-                    tokens[#tokens + 1] = {t = "comment", v = src:sub(i, j + 1)}
-                    i = j + 2
-                else
-                    tokens[#tokens + 1] = {t = "comment", v = src:sub(i)}
-                    i = n + 1
-                end
-            else
-                local j = src:find("\n", i, true) or (n + 1)
-                tokens[#tokens + 1] = {t = "comment", v = src:sub(i, j - 1)}
-                i = j
-            end
-        elseif c == '"' or c == "'" then
-            local j = i + 1
-            while j <= n do
-                local cc = src:sub(j, j)
-                if cc == "\\" then j = j + 2
-                elseif cc == c then j = j + 1; break
-                else j = j + 1 end
-            end
-            tokens[#tokens + 1] = {t = "string", v = src:sub(i, j - 1)}
-            i = j
-        elseif c == "`" then
-            local j = i + 1
-            while j <= n do
-                local cc = src:sub(j, j)
-                if cc == "\\" then j = j + 2
-                elseif cc == "`" then j = j + 1; break
-                else j = j + 1 end
-            end
-            tokens[#tokens + 1] = {t = "string", v = src:sub(i, j - 1)}
-            i = j
-        elseif is_digit(c) or (c == "." and is_digit(src:sub(i + 1, i + 1))) then
-            local j = i
-            if c == "0" and src:sub(i + 1, i + 1):lower() == "x" then
-                j = i + 2
-                while j <= n and src:sub(j, j):match("[%x]") do j = j + 1 end
-                if src:sub(j, j) == "i" then j = j + 1 end
-            else
-                local seen_dot, seen_e = false, false
-                while j <= n do
-                    local cc = src:sub(j, j)
-                    if is_digit(cc) then j = j + 1
-                    elseif cc == "." and not seen_dot and not seen_e then
-                        seen_dot = true; j = j + 1
-                    elseif (cc == "e" or cc == "E") and not seen_e then
-                        seen_e = true; j = j + 1
-                        if src:sub(j, j) == "+" or src:sub(j, j) == "-" then j = j + 1 end
-                    elseif cc == "i" and not seen_e and not seen_dot then
-                        j = j + 1; break
-                    else break end
-                end
-            end
-            tokens[#tokens + 1] = {t = "number", v = src:sub(i, j - 1)}
-            i = j
-        elseif is_alpha(c) then
-            local j = i
-            while j <= n and is_alnum(src:sub(j, j)) do j = j + 1 end
-            local word = src:sub(i, j - 1)
-            local t = "ident"
-            if KEYWORDS[word] then t = "keyword"
-            elseif BUILTINS[word] then t = "builtin" end
-            tokens[#tokens + 1] = {t = t, v = word}
-            i = j
-        else
-            local three = src:sub(i, i + 2)
-            local two = src:sub(i, i + 1)
-            if three == "..." then
-                tokens[#tokens + 1] = {t = "op", v = "..."}
-                i = i + 3
-            elseif two == "==" or two == "~=" or two == "<=" or two == ">="
-                or two == ".." or two == "//" or two == "::" or two == "->" then
-                tokens[#tokens + 1] = {t = "op", v = two}
-                i = i + 2
-            else
-                tokens[#tokens + 1] = {t = "op", v = c}
-                i = i + 1
-            end
-        end
-    end
-    return tokens
-end
-
-local function escape_rich(s)
-    s = s:gsub("&", "&amp;")
-    s = s:gsub("<", "&lt;")
-    s = s:gsub(">", "&gt;")
-    return s
-end
-
-local function highlight(src)
-    if #src > 200000 then
-        return "-- source too long to highlight (" .. #src .. " bytes)"
-    end
-    local tokens = tokenize(src)
-    local parts = {}
-    for _, tok in ipairs(tokens) do
-        if tok.t == "ws" then
-            parts[#parts + 1] = tok.v
-        else
-            local color = HL[tok.t] or HL.ident
-            parts[#parts + 1] = '<font color="' .. color .. '">' .. escape_rich(tok.v) .. '</font>'
-        end
-    end
-    return table.concat(parts)
-end
-
---=====================================================================
--- FE-STYLE WIDGETS
---=====================================================================
-
-local function mk_button(parent, text, w, x, y, primary)
-    local b = Instance.new("TextButton")
-    b.Size = UDim2.new(0, w, 0, 26)
-    b.Position = UDim2.new(0, x, 0, y)
-    b.BackgroundColor3 = primary and P.button_pri or P.button
-    b.BorderSizePixel = 0
-    b.Text = text
-    b.TextColor3 = px(255, 255, 255)
-    b.Font = FONT
-    b.TextSize = 15
-    b.TextScaled = false
-    b.AutoButtonColor = false
-    b.Parent = parent
-    return b
-end
+local suggest_frame, suggest_scroll
+local suggest_clicked = false
 
 local function drag_begin(frame)
     frame.InputBegan:Connect(function(i)
         if i.UserInputType == Enum.UserInputType.MouseButton1
-            or i.UserInputType == Enum.UserInputType.Touch then
+        or i.UserInputType == Enum.UserInputType.Touch then
+            if i.Target == inp then return end
             dragOn = true
-            dragMoved = false
-            dragFrame = bp
+            dragFrame = main
             dragStart = i.Position
-            dragPos = bp.Position
+            dragPos = main.Position
         end
     end)
 end
 
 u.InputChanged:Connect(function(i)
     if dragOn and dragFrame and (i.UserInputType == Enum.UserInputType.MouseMovement
-        or i.UserInputType == Enum.UserInputType.Touch) then
+    or i.UserInputType == Enum.UserInputType.Touch) then
         local d = i.Position - dragStart
-        if not dragMoved then
-            if math.abs(d.X) + math.abs(d.Y) < DRAG_THRESHOLD then return end
-            dragMoved = true
-        end
-        local nx = dragPos.X.Offset + d.X
-        local ny = dragPos.Y.Offset + d.Y
-        local vp = cam.ViewportSize
-        local sz = dragFrame.AbsoluteSize
-        if nx < -(sz.X - 60) then nx = -(sz.X - 60) end
-        if nx > vp.X - 60 then nx = vp.X - 60 end
-        if ny < -6 then ny = -6 end
-        if ny > vp.Y - 40 then ny = vp.Y - 40 end
-        dragFrame.Position = UDim2.new(0, nx, 0, ny)
+        dragFrame.Position = UDim2.new(
+            dragPos.X.Scale, dragPos.X.Offset + d.X,
+            dragPos.Y.Scale, dragPos.Y.Offset + d.Y
+        )
     end
 end)
 
 u.InputEnded:Connect(function(i)
     if i.UserInputType == Enum.UserInputType.MouseButton1
-        or i.UserInputType == Enum.UserInputType.Touch then
+    or i.UserInputType == Enum.UserInputType.Touch then
         dragOn = false
-        dragMoved = false
         dragFrame = nil
     end
 end)
 
---=====================================================================
--- RENDERING
---=====================================================================
-
-local function clear_scroll(sc)
-    for _, v in ipairs(sc:GetChildren()) do
-        if v:IsA("Frame") or v:IsA("TextLabel") then v:Destroy() end
+function M.log(txt, c)
+    if not sb then return end
+    local x = Instance.new("TextLabel")
+    x.Size = UDim2.new(1, 0, 0, 0)
+    x.BackgroundTransparency = 1
+    x.Text = tostring(txt)
+    x.TextColor3 = c or C.txt
+    x.Font = FONT
+    x.TextSize = TSIZE
+    x.TextXAlignment = Enum.TextXAlignment.Left
+    x.TextWrapped = true
+    x.TextYAlignment = Enum.TextYAlignment.Top
+    x.LineHeight = 1
+    x.AutomaticSize = Enum.AutomaticSize.Y
+    x.Parent = sb
+    logCount = logCount + 1
+    if logCount > MAX_LOG then
+        for _, v in ipairs(sb:GetChildren()) do
+            if v:IsA("TextLabel") then
+                v:Destroy()
+                logCount = logCount - 1
+                break
+            end
+        end
     end
 end
 
-local function render_hex()
-    clear_scroll(left_scroll)
-    local st = patch and patch.state
-    if not st or not st.working then
-        local l = Instance.new("TextLabel")
-        l.Size = UDim2.new(1, 0, 0, LINE_H)
-        l.BackgroundTransparency = 1
-        l.Text = "  no bytecode"
-        l.TextColor3 = P.dim
-        l.Font = FONT
-        l.TextSize = TSIZE
-        l.TextXAlignment = Enum.TextXAlignment.Left
-        l.Parent = left_scroll
-        return
-    end
-    local d = st.working
-    for i = 1, #d, 16 do
-        local chunk = string.sub(d, i, i + 15)
-        local hp = {}
-        for j = 1, #chunk do hp[j] = string.format("%02X", string.byte(chunk, j)) end
-        local hx = table.concat(hp, " ")
-        local asc = chunk:gsub("[^%g ]", ".")
-
-        local r = Instance.new("Frame")
-        r.Size = UDim2.new(1, 0, 0, LINE_H)
-        r.BackgroundTransparency = 1
-        r.Parent = left_scroll
-
-        local addr = Instance.new("TextLabel")
-        addr.Size = UDim2.new(0, 50, 1, 0)
-        addr.BackgroundTransparency = 1
-        addr.Text = string.format("%06X", i - 1)
-        addr.TextColor3 = P.gutter_ln
-        addr.Font = FONT
-        addr.TextSize = TSIZE
-        addr.TextXAlignment = Enum.TextXAlignment.Left
-        addr.TextYAlignment = Enum.TextYAlignment.Top
-        addr.LineHeight = 1
-        addr.Parent = r
-
-        local bytes = Instance.new("TextLabel")
-        bytes.Size = UDim2.new(1, -100, 1, 0)
-        bytes.Position = UDim2.new(0, 52, 0, 0)
-        bytes.BackgroundTransparency = 1
-        bytes.Text = hx
-        bytes.TextColor3 = P.txt
-        bytes.Font = FONT
-        bytes.TextSize = TSIZE
-        bytes.TextXAlignment = Enum.TextXAlignment.Left
-        bytes.TextYAlignment = Enum.TextYAlignment.Top
-        bytes.LineHeight = 1
-        bytes.Parent = r
-
-        local asc_lbl = Instance.new("TextLabel")
-        asc_lbl.Size = UDim2.new(0, 44, 1, 0)
-        asc_lbl.Position = UDim2.new(1, -48, 0, 0)
-        asc_lbl.BackgroundTransparency = 1
-        asc_lbl.Text = asc
-        asc_lbl.TextColor3 = P.hint
-        asc_lbl.Font = FONT
-        asc_lbl.TextSize = TSIZE
-        asc_lbl.TextXAlignment = Enum.TextXAlignment.Left
-        asc_lbl.TextYAlignment = Enum.TextYAlignment.Top
-        asc_lbl.LineHeight = 1
-        asc_lbl.Parent = r
-    end
-end
-
-local function get_source(force)
-    local st = patch and patch.state
-    if not st or not st.working then return nil, "no script" end
-    if st.user_src then return st.user_src, "user" end
-    if not force and cached_src and cached_for_bytecode == st.working then
-        return cached_src, "cache"
-    end
-    if not decompile or not decompile.decompile_best then
-        return nil, "no decompiler"
-    end
-    local ok, result, kind, err = pcall(decompile.decompile_best, st.working)
-    if not ok then return nil, "decompile crash: " .. tostring(result) end
-    if not result then return nil, "decompile failed: " .. tostring(err) end
-    cached_src = result
-    cached_for_bytecode = st.working
-    return result, kind
-end
-
-local function update_gutter(src)
-    if not right_gutter_inner then return end
-    for _, v in ipairs(right_gutter_inner:GetChildren()) do
+function M.clear()
+    if not sb then return end
+    for _, v in ipairs(sb:GetChildren()) do
         if v:IsA("TextLabel") then v:Destroy() end
     end
-    local n = 1
-    for _ in src:gmatch("\n") do n = n + 1 end
-    if n > 3000 then n = 3000 end
-    for i = 1, n do
-        local lbl = Instance.new("TextLabel")
-        lbl.Size = UDim2.new(1, -4, 0, LINE_H)
-        lbl.Position = UDim2.new(0, 0, 0, (i - 1) * LINE_H)
-        lbl.BackgroundTransparency = 1
-        lbl.Text = tostring(i)
-        lbl.TextColor3 = P.gutter_ln
-        lbl.Font = FONT
-        lbl.TextSize = TSIZE
-        lbl.TextXAlignment = Enum.TextXAlignment.Right
-        lbl.TextYAlignment = Enum.TextYAlignment.Top
-        lbl.LineHeight = 1
-        lbl.Parent = right_gutter_inner
-    end
-    right_gutter_inner.Size = UDim2.new(1, 0, 0, n * LINE_H + 8)
+    logCount = 0
 end
 
-local function render_source_view(force)
-    if mode == "edit" then
-        right_view_frame.Visible = false
-        right_edit_frame.Visible = true
-        return
-    end
-    right_view_frame.Visible = true
-    right_edit_frame.Visible = false
+function M.colors() return C end
+function M.gui_root() return gui_root end
 
-    local st = patch and patch.state
-    if not st or not st.script then
-        right_view_content.Text = '<font color="#5a5a5f">-- no script loaded</font>'
-        update_gutter("")
-        return
-    end
-    local src, kind = get_source(force)
-    if not src then
-        right_view_content.Text = '<font color="#e05f5f">-- ' .. escape_rich(tostring(kind)) .. '</font>'
-        update_gutter("")
-        return
-    end
-    right_view_content.Text = highlight(src)
-    update_gutter(src)
+function M.register(name, handler, description)
+    commands[name:lower()] = {handler = handler, description = description or ""}
 end
 
-local function update_header()
-    local st = patch and patch.state
-    local parts = {}
-    if st and st.script then
-        parts[#parts + 1] = st.script.Name
-        if st.parsed then
-            parts[#parts + 1] = "proto " .. st.proto_idx .. "/" .. #st.parsed.protos
-            parts[#parts + 1] = (st.parsed.scheme or "?")
+--========= SUGGESTIONS =========
+
+local function hide_suggestions()
+    if suggest_frame then suggest_frame.Visible = false end
+end
+
+local function clear_suggestions()
+    if not suggest_scroll then return end
+    for _, v in ipairs(suggest_scroll:GetChildren()) do
+        if v:IsA("TextButton") then v:Destroy() end
+    end
+end
+
+local function make_suggestion_row(text, subtitle, on_click)
+    local row = Instance.new("TextButton")
+    row.Size = UDim2.new(1, 0, 0, 26)
+    row.BackgroundColor3 = C.suggest_bg
+    row.BorderSizePixel = 0
+    row.Text = ""
+    row.AutoButtonColor = false
+    row.TextXAlignment = Enum.TextXAlignment.Left
+    row.ZIndex = 1
+    row.Parent = suggest_scroll
+
+    local main_lbl = Instance.new("TextLabel")
+    main_lbl.Size = UDim2.new(1, -10, 1, 0)
+    main_lbl.Position = UDim2.new(0, 8, 0, 0)
+    main_lbl.BackgroundTransparency = 1
+    main_lbl.Text = text
+    main_lbl.TextColor3 = C.txt
+    main_lbl.Font = FONT
+    main_lbl.TextSize = 13
+    main_lbl.TextXAlignment = Enum.TextXAlignment.Left
+    main_lbl.TextYAlignment = Enum.TextYAlignment.Center
+    main_lbl.ZIndex = 2
+    main_lbl.Parent = row
+
+    if subtitle and subtitle ~= "" then
+        main_lbl.Size = UDim2.new(0.6, 0, 1, 0)
+        local sub = Instance.new("TextLabel")
+        sub.Size = UDim2.new(0.4, -10, 1, 0)
+        sub.Position = UDim2.new(0.6, 0, 0, 0)
+        sub.BackgroundTransparency = 1
+        sub.Text = subtitle
+        sub.TextColor3 = C.hint
+        sub.Font = FONT
+        sub.TextSize = 12
+        sub.TextXAlignment = Enum.TextXAlignment.Right
+        sub.TextYAlignment = Enum.TextYAlignment.Center
+        sub.ZIndex = 2
+        sub.Parent = row
+    end
+
+    row.MouseEnter:Connect(function()
+        row.BackgroundColor3 = C.button_hover
+    end)
+    row.MouseLeave:Connect(function()
+        row.BackgroundColor3 = C.suggest_bg
+    end)
+    row.MouseButton1Click:Connect(function()
+        suggest_clicked = true
+        on_click()
+    end)
+
+    return row
+end
+
+local function show_suggestions(rows)
+    clear_suggestions()
+    if #rows == 0 then
+        hide_suggestions()
+        return
+    end
+    local max_visible = 6
+    local shown = math.min(#rows, max_visible)
+    suggest_scroll.CanvasSize = UDim2.new(0, 0, 0, #rows * 26)
+    suggest_scroll.AutomaticCanvasSize = Enum.AutomaticSize.None
+    suggest_frame.Size = UDim2.new(1, 0, 0, shown * 26 + 4)
+    suggest_frame.Visible = true
+end
+
+local function update_suggestions()
+    if not suggest_frame or not inp then return end
+    local txt = inp.Text
+    if txt == "" then
+        hide_suggestions()
+        return
+    end
+
+    local space = txt:find(" ", 1, true)
+
+    if not space then
+        local prefix = txt:lower()
+        local names = {}
+        for name in pairs(commands) do names[#names + 1] = name end
+        table.sort(names)
+        local btns = {}
+        for _, name in ipairs(names) do
+            if name:sub(1, #prefix) == prefix then
+                btns[#btns + 1] = make_suggestion_row(name, commands[name].description, function()
+                    inp.Text = name .. " "
+                    inp:CaptureFocus()
+                    suggest_clicked = false
+                    task.defer(update_suggestions)
+                end)
+            end
         end
-        parts[#parts + 1] = #st.working .. "b"
-    else
-        parts[#parts + 1] = "no script"
-    end
-    header_info.Text = table.concat(parts, "  ·  ")
-
-    local dot_c = P.hint
-    if st and st.script then
-        if is_dirty then dot_c = P.warn else dot_c = P.ok end
-    end
-    status_dot.BackgroundColor3 = dot_c
-
-    if is_dirty then
-        btn_save.BackgroundColor3 = P.button_pri
-    else
-        btn_save.BackgroundColor3 = P.button
+        show_suggestions(btns)
+        return
     end
 
-    if mode == "edit" then
-        btn_edit.Text = "DONE"
-        btn_edit.BackgroundColor3 = P.button_pri
-    else
-        btn_edit.Text = "EDIT"
-        btn_edit.BackgroundColor3 = P.button
+    local cmd = txt:sub(1, space - 1):lower()
+    local arg = txt:sub(space + 1):lower()
+
+    if cmd == "load" or cmd == "find" or cmd == "loadpath" or cmd == "loadin" then
+        if not BC.modules.patch or not BC.modules.patch.search_scripts then
+            hide_suggestions()
+            return
+        end
+        local results = BC.modules.patch.search_scripts(arg, 50)
+        local btns = {}
+        for _, s in ipairs(results) do
+            local name = s:GetFullName()
+            btns[#btns + 1] = make_suggestion_row(name, s.ClassName, function()
+                inp.Text = "loadpath " .. name
+                inp:CaptureFocus()
+                suggest_clicked = false
+                task.defer(function()
+                    local a = {}
+                    for x in inp.Text:gmatch("%S+") do a[#a + 1] = x end
+                    M.log("> " .. inp.Text, C.accent)
+                    local handler = commands[a[1]:lower()]
+                    if handler then
+                        pcall(handler.handler, a, inp.Text)
+                    end
+                    inp.Text = ""
+                    hide_suggestions()
+                end)
+            end)
+        end
+        show_suggestions(btns)
+        return
     end
+
+    hide_suggestions()
 end
 
-function M.render_all()
-    render_hex()
-    render_source_view(false)
-    update_header()
-end
-
---=====================================================================
--- EDIT MODE
---=====================================================================
-
-local function refresh_edit_display()
-    if not right_edit_display or not right_edit_box then return end
-    local src = right_edit_box.Text
-    right_edit_display.Text = highlight(src)
-    update_gutter(src)
-end
-
-local function enter_edit_mode()
-    loading_edit = true
-    mode = "edit"
-    local src = get_source(false) or ""
-    right_edit_box.Text = src
-    right_edit_display.Text = highlight(src)
-    update_gutter(src)
-    loading_edit = false
-    is_dirty = false
-    render_source_view(false)
-    update_header()
-end
-
-local function exit_edit_mode()
-    mode = "view"
-    local st = patch and patch.state
-    local new_src = right_edit_box.Text
-    local prev_src = cached_src or ""
-    if st then
-        if new_src ~= prev_src then
-            st.user_src = new_src
-            is_dirty = true
+local function submit()
+    if not inp then return end
+    local txt = inp.Text
+    if txt == "" then return end
+    M.log("> " .. txt, C.accent)
+    local a = {}
+    for x in txt:gmatch("%S+") do a[#a + 1] = x end
+    if #a > 0 then
+        local cmd = commands[a[1]:lower()]
+        if cmd then
+            local ok, err = pcall(cmd.handler, a, txt)
+            if not ok then M.log("[error] " .. tostring(err), C.err) end
         else
-            st.user_src = nil
-            is_dirty = false
+            M.log("unknown: " .. a[1], C.err)
         end
     end
-    render_source_view(true)
-    update_header()
+    inp.Text = ""
+    hide_suggestions()
 end
 
-local function revert_all()
-    local st = patch and patch.state
-    if st then st.user_src = nil end
-    is_dirty = false
-    cached_src = nil
-    cached_for_bytecode = nil
-    if patch and patch.revert then patch.revert() end
-    M.render_all()
-end
+function M.start(bc)
+    BC = bc
+    gui_root = (gethui and gethui()) or game:GetService("CoreGui")
 
-local function do_save()
-    local st = patch and patch.state
-    if not st or not st.script then
-        console.log("no script", P.err)
-        return
-    end
-    if not is_dirty and not st.dirty and not st.user_src then
-        console.log("nothing to save", P.dim)
-        return
-    end
-    if not patch or not patch.do_apply then
-        console.log("no apply method", P.err)
-        return
-    end
-    patch.do_apply()
-    is_dirty = false
-    cached_src = nil
-    cached_for_bytecode = nil
-    M.render_all()
-end
+    local old = gui_root:FindFirstChild("Console")
+    if old then old:Destroy() end
 
---=====================================================================
--- BUILD
---=====================================================================
+    sg = Instance.new("ScreenGui")
+    sg.Name = "Console"
+    sg.ResetOnSpawn = false
+    sg.IgnoreGuiInset = true
+    sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    sg.Parent = gui_root
 
-local function ensure_sg()
-    gui_root = console.gui_root()
-    if not gui_root and gethui then
-        local ok, r = pcall(gethui)
-        if ok and r then gui_root = r end
-    end
-    if not gui_root then gui_root = game:GetService("CoreGui") end
-    if p_sg and p_sg.Parent == gui_root then return p_sg end
-    if p_sg then p_sg:Destroy() end
-    p_sg = Instance.new("ScreenGui")
-    p_sg.Name = "BCEditor"
-    p_sg.ResetOnSpawn = false
-    p_sg.IgnoreGuiInset = true
-    p_sg.DisplayOrder = 100
-    p_sg.Parent = gui_root
-    return p_sg
-end
+    main = Instance.new("Frame")
+    main.Size = UDim2.new(1, 0, 0, 30)
+    main.Position = UDim2.new(0, 0, 0, 0)
+    main.BackgroundColor3 = C.bar
+    main.BorderColor3 = C.border
+    main.BorderSizePixel = 2
+    main.ClipsDescendants = false
+    main.ZIndex = 50
+    main.Parent = sg
 
-function M.start()
-    ensure_sg()
+    inp = Instance.new("TextBox")
+    inp.Size = UDim2.new(1, -50, 1, -4)
+    inp.Position = UDim2.new(0, 8, 0, 2)
+    inp.BackgroundTransparency = 1
+    inp.Text = ""
+    inp.PlaceholderText = "> command"
+    inp.TextColor3 = C.txt
+    inp.PlaceholderColor3 = C.hint
+    inp.Font = FONT
+    inp.TextSize = TSIZE
+    inp.TextXAlignment = Enum.TextXAlignment.Left
+    inp.TextYAlignment = Enum.TextYAlignment.Center
+    inp.ClearTextOnFocus = false
+    inp.ZIndex = 51
+    inp.Parent = main
 
-    local PANEL_W = 900
-    local PANEL_H = 520
-    local HEADER_H = 30
-    local FOOTER_H = 44
-    local PAD = 6
-    local BODY_Y = HEADER_H + PAD
-    local BODY_H = PANEL_H - HEADER_H - FOOTER_H - PAD * 2
+    minBtn = Instance.new("TextButton")
+    minBtn.Size = UDim2.new(0, 28, 0, 24)
+    minBtn.Position = UDim2.new(1, -32, 0, 2)
+    minBtn.BackgroundColor3 = C.button
+    minBtn.BorderSizePixel = 0
+    minBtn.Text = ""
+    minBtn.AutoButtonColor = false
+    minBtn.ZIndex = 51
+    minBtn.Parent = main
 
-    bp = Instance.new("Frame")
-    bp.Size = UDim2.new(0, PANEL_W, 0, PANEL_H)
-    bp.Position = UDim2.new(0.5, -PANEL_W / 2, 0.5, -PANEL_H / 2)
-    bp.BackgroundColor3 = P.bg
-    bp.BorderColor3 = P.border
-    bp.BorderSizePixel = 2
-    bp.ClipsDescendants = true
-    bp.Visible = false
-    bp.Parent = p_sg
+    hbar = Instance.new("Frame")
+    hbar.AnchorPoint = Vector2.new(0.5, 0.5)
+    hbar.Size = UDim2.new(0, 12, 0, 2)
+    hbar.Position = UDim2.new(0.5, 0, 0.5, 0)
+    hbar.BackgroundColor3 = px(255, 255, 255)
+    hbar.BorderSizePixel = 0
+    hbar.ZIndex = 55
+    hbar.Parent = minBtn
 
-    --========================
-    -- HEADER
-    --========================
-    local header = Instance.new("Frame")
-    header.Size = UDim2.new(1, -4, 0, HEADER_H)
-    header.Position = UDim2.new(0, 2, 0, 2)
-    header.BackgroundColor3 = P.topbar
-    header.BorderSizePixel = 0
-    header.Parent = bp
+    vbar = Instance.new("Frame")
+    vbar.AnchorPoint = Vector2.new(0.5, 0.5)
+    vbar.Size = UDim2.new(0, 2, 0, 12)
+    vbar.Position = UDim2.new(0.5, 0, 0.5, 0)
+    vbar.BackgroundColor3 = px(255, 255, 255)
+    vbar.BorderSizePixel = 0
+    vbar.Visible = false
+    vbar.ZIndex = 55
+    vbar.Parent = minBtn
 
-    local title = Instance.new("TextLabel")
-    title.Size = UDim2.new(1, 0, 1, 0)
-    title.BackgroundTransparency = 1
-    title.Text = "BYTECODE EDITOR"
-    title.TextColor3 = P.title
-    title.Font = FONT
-    title.TextSize = 16
-    title.TextScaled = false
-    title.ZIndex = 2
-    title.Parent = header
+    suggest_frame = Instance.new("Frame")
+    suggest_frame.Size = UDim2.new(1, 0, 0, 0)
+    suggest_frame.Position = UDim2.new(0, 0, 1, 2)
+    suggest_frame.BackgroundColor3 = C.suggest_bg
+    suggest_frame.BorderColor3 = C.border
+    suggest_frame.BorderSizePixel = 2
+    suggest_frame.Visible = false
+    suggest_frame.ClipsDescendants = true
+    suggest_frame.ZIndex = 70
+    suggest_frame.Parent = main
 
-    header_info = Instance.new("TextLabel")
-    header_info.Size = UDim2.new(0, 300, 1, 0)
-    header_info.Position = UDim2.new(0, 8, 0, 0)
-    header_info.BackgroundTransparency = 1
-    header_info.Text = ""
-    header_info.TextColor3 = P.dim
-    header_info.Font = FONT
-    header_info.TextSize = 12
-    header_info.TextXAlignment = Enum.TextXAlignment.Left
-    header_info.ZIndex = 3
-    header_info.Parent = header
+    suggest_scroll = Instance.new("ScrollingFrame")
+    suggest_scroll.Size = UDim2.new(1, -4, 1, -4)
+    suggest_scroll.Position = UDim2.new(0, 2, 0, 2)
+    suggest_scroll.BackgroundTransparency = 1
+    suggest_scroll.BorderSizePixel = 0
+    suggest_scroll.ScrollBarThickness = 4
+    suggest_scroll.ScrollBarImageColor3 = C.border
+    suggest_scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    suggest_scroll.AutomaticCanvasSize = Enum.AutomaticSize.None
+    suggest_scroll.ZIndex = 71
+    suggest_scroll.Parent = suggest_frame
 
-    status_dot = Instance.new("Frame")
-    status_dot.Size = UDim2.new(0, 10, 0, 10)
-    status_dot.Position = UDim2.new(1, -16, 0.5, -5)
-    status_dot.BackgroundColor3 = P.hint
-    status_dot.BorderSizePixel = 0
-    status_dot.ZIndex = 3
-    status_dot.Parent = header
+    local suggest_list = Instance.new("UIListLayout")
+    suggest_list.Padding = UDim.new(0, 0)
+    suggest_list.SortOrder = Enum.SortOrder.LayoutOrder
+    suggest_list.Parent = suggest_scroll
 
-    drag_begin(header)
+    panel = Instance.new("Frame")
+    panel.Size = UDim2.new(1, 0, 0, 200)
+    panel.Position = UDim2.new(0, 0, 0, 30)
+    panel.BackgroundTransparency = 1
+    panel.ClipsDescendants = true
+    panel.ZIndex = 40
+    panel.Parent = sg
 
-    --========================
-    -- PANES
-    --========================
-    local gap = 4
-    local half_w = (PANEL_W - gap * 3 - 4) / 2
+    hintBar = Instance.new("Frame")
+    hintBar.Size = UDim2.new(1, 0, 0, 20)
+    hintBar.Position = UDim2.new(0, 0, 0, 0)
+    hintBar.BackgroundColor3 = C.input
+    hintBar.BorderColor3 = C.border
+    hintBar.BorderSizePixel = 0
+    hintBar.ClipsDescendants = true
+    hintBar.ZIndex = 41
+    hintBar.Parent = panel
 
-    left_pane = Instance.new("Frame")
-    left_pane.Size = UDim2.new(0, half_w, 0, BODY_H)
-    left_pane.Position = UDim2.new(0, PAD, 0, BODY_Y)
-    left_pane.BackgroundColor3 = P.editor
-    left_pane.BorderSizePixel = 0
-    left_pane.ClipsDescendants = true
-    left_pane.Parent = bp
+    hl = Instance.new("TextLabel")
+    hl.Size = UDim2.new(1, -12, 1, 0)
+    hl.Position = UDim2.new(0, 6, 0, 0)
+    hl.BackgroundTransparency = 1
+    hl.Text = "help load loadpath loadin find scripts held findnum setnum edit apply revert gui src proto close clear"
+    hl.TextColor3 = C.hint
+    hl.Font = FONT
+    hl.TextSize = 12
+    hl.TextXAlignment = Enum.TextXAlignment.Left
+    hl.TextYAlignment = Enum.TextYAlignment.Center
+    hl.Parent = hintBar
 
-    left_scroll = Instance.new("ScrollingFrame")
-    left_scroll.Size = UDim2.new(1, 0, 1, 0)
-    left_scroll.BackgroundTransparency = 1
-    left_scroll.BorderSizePixel = 0
-    left_scroll.ScrollBarThickness = 5
-    left_scroll.ScrollBarImageColor3 = P.border
-    left_scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-    left_scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-    left_scroll.Parent = left_pane
+    out = Instance.new("Frame")
+    out.Size = UDim2.new(1, 0, 1, -20)
+    out.Position = UDim2.new(0, 0, 0, 20)
+    out.BackgroundColor3 = C.out
+    out.BorderColor3 = C.border
+    out.BorderSizePixel = 0
+    out.ClipsDescendants = true
+    out.ZIndex = 41
+    out.Parent = panel
 
-    local left_layout = Instance.new("UIListLayout")
-    left_layout.Padding = UDim.new(0, 0)
-    left_layout.SortOrder = Enum.SortOrder.LayoutOrder
-    left_layout.Parent = left_scroll
+    sb = Instance.new("ScrollingFrame")
+    sb.Size = UDim2.new(1, 0, 1, 0)
+    sb.BackgroundTransparency = 1
+    sb.BorderSizePixel = 0
+    sb.ScrollBarThickness = 5
+    sb.ScrollBarImageColor3 = C.border
+    sb.CanvasSize = UDim2.new(0, 0, 0, 0)
+    sb.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    sb.Parent = out
 
-    local left_pad = Instance.new("UIPadding")
-    left_pad.PaddingLeft = UDim.new(0, 6)
-    left_pad.PaddingTop = UDim.new(0, 4)
-    left_pad.Parent = left_scroll
+    local ll = Instance.new("UIListLayout")
+    ll.Padding = UDim.new(0, 1)
+    ll.SortOrder = Enum.SortOrder.LayoutOrder
+    ll.Parent = sb
 
-    -- RIGHT
-    right_pane = Instance.new("Frame")
-    right_pane.Size = UDim2.new(0, half_w, 0, BODY_H)
-    right_pane.Position = UDim2.new(0, PAD * 2 + half_w, 0, BODY_Y)
-    right_pane.BackgroundColor3 = P.editor
-    right_pane.BorderSizePixel = 0
-    right_pane.ClipsDescendants = true
-    right_pane.Parent = bp
+    local upl = Instance.new("UIPadding")
+    upl.PaddingLeft = UDim.new(0, 8)
+    upl.PaddingRight = UDim.new(0, 8)
+    upl.PaddingTop = UDim.new(0, 4)
+    upl.Parent = sb
 
-    -- gutter
-    local GUTTER_W = 28
-    right_gutter = Instance.new("Frame")
-    right_gutter.Size = UDim2.new(0, GUTTER_W, 1, 0)
-    right_gutter.BackgroundColor3 = P.gutter
-    right_gutter.BorderSizePixel = 0
-    right_gutter.ClipsDescendants = true
-    right_gutter.ZIndex = 5
-    right_gutter.Parent = right_pane
+    drag_begin(main)
 
-    right_gutter_inner = Instance.new("Frame")
-    right_gutter_inner.Size = UDim2.new(1, 0, 0, 0)
-    right_gutter_inner.Position = UDim2.new(0, 0, 0, 4)
-    right_gutter_inner.BackgroundTransparency = 1
-    right_gutter_inner.ZIndex = 6
-    right_gutter_inner.Parent = right_gutter
-
-    -- VIEW
-    right_view_frame = Instance.new("Frame")
-    right_view_frame.Size = UDim2.new(1, -GUTTER_W, 1, 0)
-    right_view_frame.Position = UDim2.new(0, GUTTER_W, 0, 0)
-    right_view_frame.BackgroundTransparency = 1
-    right_view_frame.BorderSizePixel = 0
-    right_view_frame.Parent = right_pane
-
-    right_view_scroll = Instance.new("ScrollingFrame")
-    right_view_scroll.Size = UDim2.new(1, 0, 1, 0)
-    right_view_scroll.BackgroundTransparency = 1
-    right_view_scroll.BorderSizePixel = 0
-    right_view_scroll.ScrollBarThickness = 5
-    right_view_scroll.ScrollBarImageColor3 = P.border
-    right_view_scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-    right_view_scroll.AutomaticCanvasSize = Enum.AutomaticSize.XY
-    right_view_scroll.ScrollingDirection = Enum.ScrollingDirection.XY
-    right_view_scroll.Parent = right_view_frame
-
-    right_view_content = Instance.new("TextLabel")
-    right_view_content.Size = UDim2.new(0, 0, 0, 0)
-    right_view_content.Position = UDim2.new(0, 6, 0, 4)
-    right_view_content.BackgroundTransparency = 1
-    right_view_content.RichText = true
-    right_view_content.Text = ""
-    right_view_content.TextColor3 = P.txt
-    right_view_content.TextXAlignment = Enum.TextXAlignment.Left
-    right_view_content.TextYAlignment = Enum.TextYAlignment.Top
-    right_view_content.Font = FONT
-    right_view_content.TextSize = TSIZE
-    right_view_content.TextWrapped = false
-    right_view_content.LineHeight = 1
-    right_view_content.AutomaticSize = Enum.AutomaticSize.XY
-    right_view_content.ZIndex = 3
-    right_view_content.Parent = right_view_scroll
-
-    -- EDIT
-    right_edit_frame = Instance.new("Frame")
-    right_edit_frame.Size = UDim2.new(1, -GUTTER_W, 1, 0)
-    right_edit_frame.Position = UDim2.new(0, GUTTER_W, 0, 0)
-    right_edit_frame.BackgroundTransparency = 1
-    right_edit_frame.BorderSizePixel = 0
-    right_edit_frame.Visible = false
-    right_edit_frame.Parent = right_pane
-
-    right_edit_scroll = Instance.new("ScrollingFrame")
-    right_edit_scroll.Size = UDim2.new(1, 0, 1, 0)
-    right_edit_scroll.BackgroundTransparency = 1
-    right_edit_scroll.BorderSizePixel = 0
-    right_edit_scroll.ScrollBarThickness = 5
-    right_edit_scroll.ScrollBarImageColor3 = P.border
-    right_edit_scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-    right_edit_scroll.AutomaticCanvasSize = Enum.AutomaticSize.XY
-    right_edit_scroll.ScrollingDirection = Enum.ScrollingDirection.XY
-    right_edit_scroll.Parent = right_edit_frame
-
-    right_edit_display = Instance.new("TextLabel")
-    right_edit_display.Size = UDim2.new(0, 0, 0, 0)
-    right_edit_display.Position = UDim2.new(0, 6, 0, 4)
-    right_edit_display.BackgroundTransparency = 1
-    right_edit_display.RichText = true
-    right_edit_display.Text = ""
-    right_edit_display.TextColor3 = P.txt
-    right_edit_display.TextXAlignment = Enum.TextXAlignment.Left
-    right_edit_display.TextYAlignment = Enum.TextYAlignment.Top
-    right_edit_display.Font = FONT
-    right_edit_display.TextSize = TSIZE
-    right_edit_display.TextWrapped = false
-    right_edit_display.LineHeight = 1
-    right_edit_display.AutomaticSize = Enum.AutomaticSize.XY
-    right_edit_display.ZIndex = 3
-    right_edit_display.Parent = right_edit_scroll
-
-    right_edit_box = Instance.new("TextBox")
-    right_edit_box.Size = UDim2.new(0, 0, 0, 0)
-    right_edit_box.Position = UDim2.new(0, 6, 0, 4)
-    right_edit_box.BackgroundTransparency = 1
-    right_edit_box.Text = ""
-    right_edit_box.TextColor3 = P.editor
-    right_edit_box.TextTransparency = 1
-    right_edit_box.TextXAlignment = Enum.TextXAlignment.Left
-    right_edit_box.TextYAlignment = Enum.TextYAlignment.Top
-    right_edit_box.Font = FONT
-    right_edit_box.TextSize = TSIZE
-    right_edit_box.LineHeight = 1
-    right_edit_box.TextWrapped = false
-    right_edit_box.MultiLine = true
-    right_edit_box.ClearTextOnFocus = false
-    right_edit_box.AutomaticSize = Enum.AutomaticSize.XY
-    right_edit_box.ZIndex = 4
-    right_edit_box.Parent = right_edit_scroll
-
-    -- sync gutter with edit scroll
-    right_edit_scroll:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
-        right_gutter_inner.Position = UDim2.new(0, 0, 0, -right_edit_scroll.CanvasPosition.Y + 4)
-    end)
-    right_view_scroll:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
-        right_gutter_inner.Position = UDim2.new(0, 0, 0, -right_view_scroll.CanvasPosition.Y + 4)
+    inp:GetPropertyChangedSignal("Text"):Connect(function()
+        task.defer(update_suggestions)
     end)
 
-    right_edit_box:GetPropertyChangedSignal("Text"):Connect(function()
-        if loading_edit then return end
-        is_dirty = true
-        refresh_edit_display()
-        update_header()
+    inp.Focused:Connect(function()
+        task.defer(update_suggestions)
     end)
 
-    right_edit_box.Focused:Connect(function()
-        is_focused = true
-    end)
-    right_edit_box.FocusLost:Connect(function()
-        is_focused = false
-    end)
-
-    --========================
-    -- FOOTER
-    --========================
-    footer = Instance.new("Frame")
-    footer.Size = UDim2.new(1, -4, 0, FOOTER_H - PAD - 2)
-    footer.Position = UDim2.new(0, 2, 1, -FOOTER_H + 2)
-    footer.BackgroundTransparency = 1
-    footer.BorderSizePixel = 0
-    footer.Parent = bp
-
-    btn_decompile = mk_button(footer, "DECOMPILE", 110, 0, 4, false)
-    btn_edit = mk_button(footer, "EDIT", 80, 116, 4, false)
-    btn_revert = mk_button(footer, "REVERT", 90, 202, 4, false)
-
-    local btn_w_save = 100
-    local btn_w_exit = 80
-    local right_margin = 0
-    btn_save = mk_button(footer, "SAVE", btn_w_save,
-        PANEL_W - PAD * 2 - btn_w_save - 4, 4, false)
-    btn_exit = mk_button(footer, "EXIT", btn_w_exit,
-        PANEL_W - PAD * 2 - btn_w_save - btn_w_exit - 10, 4, false)
-
-    --========================
-    -- EVENTS
-    --========================
-    btn_decompile.MouseButton1Click:Connect(function()
-        if mode == "edit" then exit_edit_mode() end
-        cached_src = nil
-        cached_for_bytecode = nil
-        M.render_all()
-        console.log("re-decompiled via D1", P.ok)
-    end)
-
-    btn_edit.MouseButton1Click:Connect(function()
-        if mode == "view" then
-            enter_edit_mode()
+    inp.FocusLost:Connect(function(enter)
+        if enter then
+            submit()
         else
-            exit_edit_mode()
+            task.defer(function()
+                task.wait(0.1)
+                if not suggest_clicked then
+                    hide_suggestions()
+                end
+                suggest_clicked = false
+            end)
         end
     end)
 
-    btn_revert.MouseButton1Click:Connect(revert_all)
-
-    btn_exit.MouseButton1Click:Connect(function()
-        bp.Visible = false
+    minBtn.MouseButton1Click:Connect(function()
+        min = not min
+        vbar.Visible = min
+        local info = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+        t:Create(panel, info, {Size = min and UDim2.new(1, 0, 0, 0) or UDim2.new(1, 0, 0, 200)}):Play()
     end)
 
-    btn_save.MouseButton1Click:Connect(do_save)
-end
+    M.register("help", function()
+        M.log("commands:", C.accent)
+        local names = {}
+        for name in pairs(commands) do names[#names + 1] = name end
+        table.sort(names)
+        for _, name in ipairs(names) do
+            local cmd = commands[name]
+            M.log("  " .. name .. "  " .. cmd.description, C.txt)
+        end
+    end, "show this help")
 
-function M.show()
-    if not bp then M.start() end
-    ensure_sg()
-    if bp.Parent ~= p_sg then bp.Parent = p_sg end
-    bp.Visible = true
-    M.render_all()
-end
+    M.register("clear", function() M.clear() end, "clear output")
 
-function M.hide()
-    if bp then bp.Visible = false end
+    M.register("load", function(a)
+        if not a[2] then M.log("usage: load <name>", C.err) return end
+        if BC.modules.patch and BC.modules.patch.load_script then
+            BC.modules.patch.load_script(a[2])
+        end
+    end, "load by name")
+
+    M.register("loadpath", function(a)
+        if not a[2] then M.log("usage: loadpath <path>", C.err) return end
+        if BC.modules.patch and BC.modules.patch.load_path then
+            BC.modules.patch.load_path(a[2])
+        end
+    end, "load by full path")
+
+    M.register("loadin", function(a)
+        if not a[2] or not a[3] then
+            M.log("usage: loadin <container> <script>", C.err)
+            return
+        end
+        if BC.modules.patch and BC.modules.patch.load_script_in then
+            BC.modules.patch.load_script_in(a[2], a[3])
+        end
+    end, "load script inside container")
+
+    M.register("find", function(a)
+        local query = a[2] or ""
+        if not BC.modules.patch or not BC.modules.patch.search_scripts then return end
+        local results = BC.modules.patch.search_scripts(query, 50)
+        M.log("found " .. #results .. " scripts:", C.accent)
+        for i, s in ipairs(results) do
+            M.log("  [" .. i .. "] " .. s:GetFullName() .. "  (" .. s.ClassName .. ")", C.txt)
+        end
+        M.log("use: loadpath <full path>", C.hint)
+    end, "find scripts by name substring")
+
+    M.register("scripts", function()
+        if BC.modules.patch and BC.modules.patch.list_scripts then
+            BC.modules.patch.list_scripts()
+        end
+    end, "list running scripts")
+
+    M.register("held", function()
+        if BC.modules.patch and BC.modules.patch.list_held then
+            BC.modules.patch.list_held()
+        end
+    end, "list held tool scripts")
+
+    M.register("gui", function()
+        if BC.modules.panel and BC.modules.panel.show then BC.modules.panel.show() end
+    end, "open editor window")
+
+    M.register("close", function()
+        if BC.modules.panel and BC.modules.panel.hide then BC.modules.panel.hide() end
+    end, "hide editor window")
+
+    M.register("apply", function()
+        if BC.modules.patch and BC.modules.patch.do_apply then BC.modules.patch.do_apply() end
+    end, "apply changes via D1")
+
+    M.register("revert", function()
+        if BC.modules.patch and BC.modules.patch.revert then BC.modules.patch.revert() end
+    end, "restore original")
+
+    M.register("findnum", function(a)
+        if BC.modules.patch and BC.modules.patch.findnum_cmd then
+            BC.modules.patch.findnum_cmd(a)
+        end
+    end, "find all LOADN/LOADK with value")
+
+    M.register("setnum", function(a)
+        if BC.modules.patch and BC.modules.patch.setnum_cmd then
+            BC.modules.patch.setnum_cmd(a)
+        end
+    end, "setnum <old> <new> — replace first match")
+
+    M.register("src", function()
+        if BC.modules.patch and BC.modules.patch.decompile_full then
+            local src, err, kind = BC.modules.patch.decompile_full()
+            if not src then
+                M.log("decompile failed: " .. tostring(err), C.err)
+            else
+                M.log("--- SOURCE via " .. tostring(kind) .. " (" .. #src .. " bytes) ---", C.accent)
+                for line in src:gmatch("[^\n]+") do M.log(line, C.txt) end
+                M.log("--- END ---", C.accent)
+            end
+        end
+    end, "show source from D1")
+
+    M.register("edit", function(a)
+        if BC.modules.patch and BC.modules.patch.edit_cmd then BC.modules.patch.edit_cmd(a) end
+    end, "edit <loadn|loadb|loadk> <pc> <val>")
+
+    M.register("proto", function(a)
+        if BC.modules.patch and BC.modules.patch.switch_proto then BC.modules.patch.switch_proto(a) end
+    end, "switch proto")
 end
 
 function M.init(bc)
     BC = bc
-    console = bc.modules.console
-    parser = bc.modules.parser
-    patch = bc.modules.patch
-    decompile = bc.modules.decompile
-    C = console.colors()
 end
 
 return M
