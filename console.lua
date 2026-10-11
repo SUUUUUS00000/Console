@@ -21,7 +21,7 @@ local C = {
     hex    = Color3.fromRGB(170, 170, 170),
 }
 
-local MAX_LOG = 2000
+local MAX_LOG = 5000
 local logCount = 0
 local min = false
 local dragOn, dragStart, dragPos, dragFrame
@@ -203,7 +203,7 @@ function M.start(bc)
     hl.Size = UDim2.new(1, -12, 1, 0)
     hl.Position = UDim2.new(0, 6, 0, 0)
     hl.BackgroundTransparency = 1
-    hl.Text = "help load scripts held edit apply revert gui src srcall proto close clear"
+    hl.Text = "help load scripts held edit apply revert gui src srcall srclocal proto close clear"
     hl.TextColor3 = C.hint
     hl.Font = Enum.Font.Code
     hl.TextSize = 11
@@ -287,27 +287,19 @@ function M.start(bc)
     end, "list held tool scripts")
 
     M.register("gui", function()
-        if BC.modules.panel and BC.modules.panel.show then
-            BC.modules.panel.show()
-        end
+        if BC.modules.panel and BC.modules.panel.show then BC.modules.panel.show() end
     end, "open editor window")
 
     M.register("close", function()
-        if BC.modules.panel and BC.modules.panel.hide then
-            BC.modules.panel.hide()
-        end
+        if BC.modules.panel and BC.modules.panel.hide then BC.modules.panel.hide() end
     end, "hide editor window")
 
     M.register("apply", function()
-        if BC.modules.patch and BC.modules.patch.do_apply then
-            BC.modules.patch.do_apply()
-        end
+        if BC.modules.patch and BC.modules.patch.do_apply then BC.modules.patch.do_apply() end
     end, "apply changes")
 
     M.register("revert", function()
-        if BC.modules.patch and BC.modules.patch.revert then
-            BC.modules.patch.revert()
-        end
+        if BC.modules.patch and BC.modules.patch.revert then BC.modules.patch.revert() end
     end, "restore original")
 
     M.register("src", function()
@@ -316,40 +308,45 @@ function M.start(bc)
             if not src then
                 M.log("decompile failed: " .. tostring(err), C.err)
             else
-                M.log("--- DECOMPILED ---", C.accent)
-                for line in src:gmatch("[^\n]+") do
-                    M.log(line, C.txt)
-                end
+                M.log("--- DECOMPILED (local, current proto) ---", C.accent)
+                for line in src:gmatch("[^\n]+") do M.log(line, C.txt) end
                 M.log("--- END ---", C.accent)
             end
         end
-    end, "show decompiled source of current proto")
+    end, "show decompiled current proto (local)")
 
     M.register("srcall", function()
         if BC.modules.patch and BC.modules.patch.decompile_full then
-            local src, err = BC.modules.patch.decompile_full()
+            local src, err, kind = BC.modules.patch.decompile_full()
             if not src then
                 M.log("decompile failed: " .. tostring(err), C.err)
             else
-                M.log("--- FULL SCRIPT (" .. #src .. " bytes) ---", C.accent)
-                for line in src:gmatch("[^\n]+") do
-                    M.log(line, C.txt)
-                end
+                M.log("--- FULL SCRIPT via " .. tostring(kind) .. " (" .. #src .. " bytes) ---", C.accent)
+                for line in src:gmatch("[^\n]+") do M.log(line, C.txt) end
                 M.log("--- END ---", C.accent)
             end
         end
-    end, "show decompiled full script")
+    end, "show full script via D1 (fallback local)")
+
+    M.register("srclocal", function()
+        if BC.modules.patch and BC.modules.patch.decompile_local then
+            local src, err = BC.modules.patch.decompile_local()
+            if not src then
+                M.log("decompile failed: " .. tostring(err), C.err)
+            else
+                M.log("--- FULL SCRIPT (local) ---", C.accent)
+                for line in src:gmatch("[^\n]+") do M.log(line, C.txt) end
+                M.log("--- END ---", C.accent)
+            end
+        end
+    end, "show full script via local decompiler")
 
     M.register("edit", function(a)
-        if BC.modules.patch and BC.modules.patch.edit_cmd then
-            BC.modules.patch.edit_cmd(a)
-        end
+        if BC.modules.patch and BC.modules.patch.edit_cmd then BC.modules.patch.edit_cmd(a) end
     end, "edit <loadn|loadb|loadk> <pc> <val>")
 
     M.register("proto", function(a)
-        if BC.modules.patch and BC.modules.patch.switch_proto then
-            BC.modules.patch.switch_proto(a)
-        end
+        if BC.modules.patch and BC.modules.patch.switch_proto then BC.modules.patch.switch_proto(a) end
     end, "switch proto")
 end
 
