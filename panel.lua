@@ -16,6 +16,7 @@ local selected_byte = -1
 local dragOn, dragStart, dragPos, dragFrame
 
 local u = game:GetService("UserInputService")
+local cam = workspace.CurrentCamera
 
 local function drag(frame)
     frame.InputBegan:Connect(function(i)
@@ -33,10 +34,22 @@ u.InputChanged:Connect(function(i)
     if dragOn and dragFrame and (i.UserInputType == Enum.UserInputType.MouseMovement
     or i.UserInputType == Enum.UserInputType.Touch) then
         local d = i.Position - dragStart
-        dragFrame.Position = UDim2.new(
-            dragPos.X.Scale, dragPos.X.Offset + d.X,
-            dragPos.Y.Scale, dragPos.Y.Offset + d.Y
-        )
+        local newX = dragPos.X.Offset + d.X
+        local newY = dragPos.Y.Offset + d.Y
+
+        local vp = cam.ViewportSize
+        local sz = dragFrame.AbsoluteSize
+        local minX = -(sz.X - 120)
+        local maxX = vp.X - 120
+        local minY = 0
+        local maxY = vp.Y - 40
+
+        if newX < minX then newX = minX end
+        if newX > maxX then newX = maxX end
+        if newY < minY then newY = minY end
+        if newY > maxY then newY = maxY end
+
+        dragFrame.Position = UDim2.new(dragPos.X.Scale, newX, dragPos.Y.Scale, newY)
     end
 end)
 
@@ -62,9 +75,7 @@ end
 
 local function ensure_sg()
     gui_root = resolve_gui_root()
-    if p_sg and p_sg.Parent == gui_root then
-        return p_sg
-    end
+    if p_sg and p_sg.Parent == gui_root then return p_sg end
     if p_sg then p_sg:Destroy() end
     p_sg = Instance.new("ScreenGui")
     p_sg.Name = "BCEditor"
@@ -406,9 +417,10 @@ local function update_save_state()
         bpApply.TextColor3 = C.dim
     end
     if st.script and st.working then
+        local sch = st.parsed and st.parsed.scheme or "?"
         bpTitle.Text = string.format(
-            "BYTECODE  %s   proto=%d   size=%d   %s",
-            st.script.Name, st.proto_idx, #st.working,
+            "BYTECODE  %s   proto=%d   size=%d   op=%s   %s",
+            st.script.Name, st.proto_idx, #st.working, sch,
             st.dirty and "[modified]" or "[clean]"
         )
     else
@@ -584,16 +596,10 @@ function M.start()
     bpApply.MouseButton1Click:Connect(function()
         if patch and patch.do_apply then patch.do_apply() end
     end)
-
-    if console and console.log then
-        console.log("panel: created, screenGui parent=" .. tostring(p_sg.Parent), C.dim)
-    end
 end
 
 function M.show()
-    if not bp then
-        M.start()
-    end
+    if not bp then M.start() end
     if not bp then
         if console and console.log then
             console.log("panel: failed to create", C.err)
@@ -602,24 +608,14 @@ function M.show()
     end
 
     ensure_sg()
-    if bp.Parent ~= p_sg then
-        bp.Parent = p_sg
-    end
+    if bp.Parent ~= p_sg then bp.Parent = p_sg end
 
     bp.Visible = true
     bp.Position = UDim2.new(0.5, -390, 0.5, -220)
 
-    if console and console.log then
-        console.log("panel: visible=" .. tostring(bp.Visible)
-            .. " parent=" .. tostring(bp.Parent and bp.Parent.ClassName)
-            .. " screenGui=" .. tostring(p_sg.Parent and p_sg.Parent.ClassName), C.ok)
-    end
-
     local ok, err = pcall(M.render_all)
-    if not ok then
-        if console and console.log then
-            console.log("panel render error: " .. tostring(err), C.err)
-        end
+    if not ok and console and console.log then
+        console.log("panel render error: " .. tostring(err), C.err)
     end
 end
 
