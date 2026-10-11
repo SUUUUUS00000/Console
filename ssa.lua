@@ -4,23 +4,8 @@ M.name = "ssa"
 local BC
 local parser
 
--- Классификация версии:
---   param  - параметр функции (R0..numparams-1, def_pc == -1)
---   temp   - один def, один use, оба в одном блоке -> можно инлайнить
---   value  - один def, несколько use, все в одном блоке или приходят из одной ветки
---   mut    - несколько def (переприсваивается) -> точно local
---   phi    - версия на входе в блок с несколькими предшественниками
---   loop   - loop-carried переменная (пишется и читается в цикле)
-
-local function is_jump(name)
-    if name == "JUMP" or name == "JUMPBACK" or name == "JUMPX" then return true end
-    if name == "JUMPIF" or name == "JUMPIFNOT" then return true end
-    if name == "JUMPIFEQ" or name == "JUMPIFNOTEQ" then return true end
-    if name == "JUMPIFLE" or name == "JUMPIFLT" then return true end
-    if name == "JUMPIFNOTLE" or name == "JUMPIFNOTLT" then return true end
-    if name == "JUMPXEQKNIL" or name == "JUMPXEQKB" then return true end
-    if name == "JUMPXEQKN" or name == "JUMPXEQKS" then return true end
-    return false
+local function is_unconditional_jump(name)
+    return name == "JUMP" or name == "JUMPBACK" or name == "JUMPX"
 end
 
 local function is_cond_jump(name)
@@ -37,16 +22,30 @@ local function jump_target(ins)
     if ins.name == "JUMPX" then
         return ins.word_idx + ins.e + ins.length
     end
-    if is_jump(ins.name) then
+    if is_unconditional_jump(ins.name) or is_cond_jump(ins.name) then
         return ins.word_idx + ins.d + ins.length
     end
     if ins.name == "LOADB" and ins.c ~= 0 then
         return ins.word_idx + ins.c + ins.length
     end
+    if ins.name == "FORNPREP" or ins.name == "FORGPREP"
+        or ins.name == "FORGPREP_INEXT" or ins.name == "FORGPREP_NEXT" then
+        return ins.word_idx + ins.d + ins.length
+    end
+    if ins.name == "FORNLOOP" or ins.name == "FORGLOOP" then
+        return ins.word_idx + ins.d + ins.length
+    end
     return -1
 end
 
--- Какие регистры читает инструкция
+local function is_branching(name)
+    return is_unconditional_jump(name) or is_cond_jump(name)
+        or name == "FORNPREP" or name == "FORNLOOP"
+        or name == "FORGPREP" or name == "FORGLOOP"
+        or name == "FORGPREP_INEXT" or name == "FORGPREP_NEXT"
+        or (name == "LOADB")
+end
+
 local function read_regs(ins)
     local n = ins.name
     local r = {}
@@ -99,7 +98,9 @@ local function read_regs(ins)
         r[#r+1] = ins.a
     elseif n == "SETLIST" then
         local c = (ins.c or 1) - 1
-        for k = 0, c - 1 do r[#r+1] = ins.b + k end
+        if c > 0 then
+            for k = 0, c - 1 do r[#r+1] = ins.b + k end
+        end
     elseif n == "FORNPREP" or n == "FORNLOOP" then
         r[#r+1] = ins.a
         r[#r+1] = ins.a + 1
@@ -116,7 +117,6 @@ local function read_regs(ins)
     return r
 end
 
--- Какие регистры пишет инструкция
 local function write_regs(ins)
     local n = ins.name
     local r = {}
@@ -148,9 +148,7 @@ local function write_regs(ins)
         elseif b > 0 then
             for k = 0, b - 1 do r[#r+1] = ins.a + k end
         end
-    elseif n == "FORNPREP" then
-        r[#r+1] = ins.a + 2
-    elseif n == "FORNLOOP" then
+    elseif n == "FORNPREP" or n == "FORNLOOP" then
         r[#r+1] = ins.a + 2
     elseif n == "FORGLOOP" then
         r[#r+1] = ins.a + 2
@@ -167,29 +165,10 @@ local function analyze_blocks(instrs)
     end
 
     local leaders = {}
-    if #instrs > 0 then
-        leaders[1] = true
-    end
+    if #instrs > 0 then leaders[1] = true end
 
     for i, ins in ipairs(instrs) do
-        if ins.name == "JUMP" or ins.name == "JUMPBACK" or ins.name == "JUMPX" then
-            local t = jump_target(ins)
-            if index[t] then leaders[index[t]] = true end
-            if index[i + 1] then leaders[i + 1] = true end
-        elseif is_cond_jump(ins.name) then
-            local t = jump_target(ins)
-            if index[t] then leaders[index[t]] = true end
-            if index[i + 1] then leaders[i + 1] = true end
-        elseif ins.name == "LOADB" and ins.c ~= 0 then
-            local t = jump_target(ins)
-            if index[t] then leaders[index[t]] = true end
-            if index[i + 1] then leaders[i + 1] = true end
-        elseif ins.name == "FORNPREP" or ins.name == "FORGPREP"
-            or ins.name == "FORGPREP_INEXT" or ins.name == "FORGPREP_NEXT" then
-            local t = jump_target(ins)
-            if index[t] then leaders[index[t]] = true end
-            if index[i + 1] then leaders[i + 1] = true end
-        elseif ins.name == "FORNLOOP" or ins.name == "FORGLOOP" then
+        if is_branching(ins.name) then
             local t = jump_target(ins)
             if index[t] then leaders[index[t]] = true end
             if index[i + 1] then leaders[i + 1] = true end
@@ -211,18 +190,13 @@ local function analyze_blocks(instrs)
         end
     end
 
-    -- предшественники (по индексу в instrs, с учётом jumps)
     local preds = {}
-    for bi, b in ipairs(blocks) do
-        preds[bi] = {}
-    end
+    for bi = 1, #blocks do preds[bi] = {} end
     for i, ins in ipairs(instrs) do
         local bi = block_of[i]
-        if ins.name == "JUMP" or ins.name == "JUMPBACK" or ins.name == "JUMPX" then
+        if is_unconditional_jump(ins.name) then
             local t = jump_target(ins)
-            if index[t] then
-                table.insert(preds[block_of[index[t]]], bi)
-            end
+            if index[t] then table.insert(preds[block_of[index[t]]], bi) end
         elseif is_cond_jump(ins.name) then
             local t = jump_target(ins)
             if index[t] then table.insert(preds[block_of[index[t]]], bi) end
@@ -256,13 +230,15 @@ function M.build(instrs, proto)
     end
 
     local blocks, block_of, preds = analyze_blocks(instrs)
+    local index = {}
+    for i, ins in ipairs(instrs) do index[ins.word_idx] = i end
 
     local versions = {}
     local version_count = 0
     local name_of = {}
     local read_at = {}
     local write_at = {}
-    local reg_ver = {}   -- reg -> version_id
+    local reg_ver = {}
 
     local function new_version(reg, def_pc, kind)
         version_count = version_count + 1
@@ -273,11 +249,9 @@ function M.build(instrs, proto)
             uses = {},
             kind = kind or "value",
         }
-        name_of[version_count] = nil
         return version_count
     end
 
-    -- параметры
     local nparams = proto.numparams or 0
     for i = 0, nparams - 1 do
         local v = new_version(i, -1, "param")
@@ -293,20 +267,12 @@ function M.build(instrs, proto)
         return reg_ver[reg]
     end
 
-    -- отслеживаем "входные версии" для каждого блока
-    local block_entry = {}
-    local block_exit = {}
-    block_entry[1] = {}
-    for r, v in pairs(reg_ver) do block_entry[1][r] = v end
-
-    -- проверка: блок является целью обратного перехода (loop body)?
+    -- loop detection: блоки внутри обратного перехода
     local loop_of = {}
     for i, ins in ipairs(instrs) do
-        if ins.name == "JUMPBACK" or (is_cond_jump(ins.name)) then
+        if is_unconditional_jump(ins.name) or is_cond_jump(ins.name) then
             local t = jump_target(ins)
             if t > 0 and t < ins.word_idx then
-                -- этот jump идёт назад
-                -- все блоки между target и jump — внутри цикла
                 for bi, b in ipairs(blocks) do
                     if b.start_pc >= t and b.start_pc <= ins.word_idx then
                         loop_of[bi] = true
@@ -316,12 +282,14 @@ function M.build(instrs, proto)
         end
     end
 
-    -- Проход по блокам в порядке pc
+    local block_entry = {}
+    local block_exit = {}
+    block_entry[1] = {}
+    for r, v in pairs(reg_ver) do block_entry[1][r] = v end
+
     for bi, b in ipairs(blocks) do
-        -- если в блок ведут несколько предшественников с разными версиями — phi
         local entry = block_entry[bi]
         if not entry then
-            -- вычисляем entry как объединение exit предшественников
             entry = {}
             for r, v in pairs(reg_ver) do entry[r] = v end
             local ps = preds[bi] or {}
@@ -332,9 +300,12 @@ function M.build(instrs, proto)
                         if entry[r] == nil then
                             entry[r] = pv
                         elseif entry[r] ~= pv then
-                            -- конфликт: создаём phi
+                            -- создаём phi
                             local phi_id = new_version(r, -1, "phi")
+                            name_of[phi_id] = "phi" .. phi_id
                             entry[r] = phi_id
+                            -- подтягиваем phi в предшественников, чтобы они использовали ту же версию
+                            reg_ver[r] = phi_id
                         end
                     end
                 end
@@ -342,20 +313,15 @@ function M.build(instrs, proto)
             block_entry[bi] = entry
         end
 
-        -- обновляем reg_ver из entry
         for r, v in pairs(entry) do
-            if reg_ver[r] == nil then
-                reg_ver[r] = v
-            end
+            if reg_ver[r] == nil then reg_ver[r] = v end
         end
 
-        -- обработка инструкций блока
         for _, ins in ipairs(b.instrs) do
             local pc = ins.word_idx
             read_at[pc] = {}
             write_at[pc] = {}
 
-            -- регистры, читаемые
             local rr = read_regs(ins)
             for _, r in ipairs(rr) do
                 local v = reg_ver[r]
@@ -364,18 +330,14 @@ function M.build(instrs, proto)
                 table.insert(versions[v].uses, pc)
             end
 
-            -- регистры, записываемые
             local wr = write_regs(ins)
             for _, r in ipairs(wr) do
-                -- если регистр loop-carried, не создаём новую версию
                 local is_loop = false
-                if loop_of[bi] then
-                    -- проверяем, читается ли r раньше в том же цикле
-                    if reg_ver[r] and versions[reg_ver[r]].def_pc >= 0 then
-                        local prev_v = reg_ver[r]
-                        local prev_def_pc = versions[prev_v].def_pc
-                        -- если prev version определена внутри этого же цикла — loop-carried
-                        for bj, b2 in pairs(loop_of) do
+                if loop_of[bi] and reg_ver[r] then
+                    local prev_v = reg_ver[r]
+                    local prev_def_pc = versions[prev_v].def_pc
+                    if prev_def_pc and prev_def_pc >= 0 then
+                        for bj in pairs(loop_of) do
                             local bb = blocks[bj]
                             if bb and prev_def_pc >= bb.start_pc and prev_def_pc <= bb.end_pc then
                                 is_loop = true
@@ -386,7 +348,6 @@ function M.build(instrs, proto)
                 end
 
                 if is_loop and reg_ver[r] then
-                    -- переиспользуем существующую версию
                     write_at[pc][r] = reg_ver[r]
                     versions[reg_ver[r]].kind = "mut"
                 else
@@ -397,7 +358,6 @@ function M.build(instrs, proto)
             end
         end
 
-        -- сохраняем выходные версии
         block_exit[bi] = {}
         for r, v in pairs(reg_ver) do
             block_exit[bi][r] = v
@@ -406,39 +366,19 @@ function M.build(instrs, proto)
 
     -- финальная классификация
     for id, v in pairs(versions) do
-        if v.kind == "value" then
-            local def_block = block_of[v.def_pc and 1 or 1]
-            local all_uses_same_block = true
-            for _, u in ipairs(v.uses) do
-                local ui = nil
-                for i, ins in ipairs(instrs) do
-                    if ins.word_idx == u then ui = i break end
-                end
-                if ui then
-                    local def_i = nil
-                    for i, ins in ipairs(instrs) do
-                        if ins.word_idx == v.def_pc then def_i = i break end
-                    end
-                    if def_i and block_of[ui] ~= block_of[def_i] then
-                        all_uses_same_block = false
-                        break
-                    end
-                end
-            end
-
+        if v.kind == "value" or v.kind == "phi" then
             if #v.uses == 0 then
-                v.kind = "dead"
-            elseif #v.uses == 1 and all_uses_same_block then
-                v.kind = "temp"
-            elseif all_uses_same_block then
-                v.kind = "value"
-            else
-                v.kind = "value"
+                if v.kind ~= "phi" then v.kind = "dead" end
+            elseif #v.uses == 1 then
+                local def_i = v.def_pc >= 0 and index[v.def_pc] or nil
+                local use_i = index[v.uses[1]]
+                if def_i and use_i and block_of[def_i] == block_of[use_i] then
+                    v.kind = "temp"
+                end
             end
         end
     end
 
-    -- имена для временных и значений: t1, t2, ...
     local counter = 0
     for id = 1, version_count do
         if not name_of[id] then
@@ -459,7 +399,7 @@ function M.build(instrs, proto)
     }
 end
 
-function M.name_for(ssa, version_id)
+M.name_for = function(ssa, version_id)
     if not version_id then return "?" end
     return ssa.name_of[version_id] or ("t" .. version_id)
 end
