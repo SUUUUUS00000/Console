@@ -93,8 +93,6 @@ local function rd_double(d, pos)
     return v, pos + 8
 end
 
---========= OPCODE SCHEME DETECTION =========
-
 local function proto_ok(proto, dec)
     local code = proto.code_words
     local n = #code
@@ -135,7 +133,6 @@ local function build_candidates()
         for x = 0, 255 do t[x] = x end
         list[#list+1] = {name = "identity", dec = t}
     end
-    local tried = { [1] = true, [203] = true, [227] = true }
     local order = {227, 203, 37}
     for _, k in ipairs(order) do
         local t = {}
@@ -143,7 +140,7 @@ local function build_candidates()
         list[#list+1] = {name = "mul " .. k, dec = t}
     end
     for k = 1, 255, 2 do
-        if not tried[k] then
+        if k ~= 1 and k ~= 203 and k ~= 227 and k ~= 37 then
             local t = {}
             for x = 0, 255 do t[x] = (x * k) % 256 end
             list[#list+1] = {name = "mul " .. k, dec = t}
@@ -188,8 +185,6 @@ local function apply_scheme(protos, scheme)
         end
     end
 end
-
---========= PARSER =========
 
 local function parse_impl(data)
     local pos = 1
