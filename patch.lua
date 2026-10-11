@@ -2,7 +2,7 @@ local M = {}
 M.name = "patch"
 
 local BC
-local console, parser, disasm, decompile
+local console, parser, decompile
 
 local l = game:GetService("Players").LocalPlayer
 
