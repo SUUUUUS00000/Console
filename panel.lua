@@ -6,6 +6,7 @@ local console, parser, disasm, cfgs, patch, names, varflow
 
 local C
 local gui_root
+local p_sg
 local bp, bpTitle, bpBody, bpLeft, bpLeftScroll, bpRight, bpRightScroll
 local bpFoot, bpExit, bpApply
 
@@ -57,6 +58,21 @@ local function resolve_gui_root()
         if ok and r then return r end
     end
     return game:GetService("CoreGui")
+end
+
+local function ensure_sg()
+    gui_root = resolve_gui_root()
+    if p_sg and p_sg.Parent == gui_root then
+        return p_sg
+    end
+    if p_sg then p_sg:Destroy() end
+    p_sg = Instance.new("ScreenGui")
+    p_sg.Name = "BCEditor"
+    p_sg.ResetOnSpawn = false
+    p_sg.IgnoreGuiInset = true
+    p_sg.DisplayOrder = 100
+    p_sg.Parent = gui_root
+    return p_sg
 end
 
 local function clear_hex()
@@ -292,6 +308,22 @@ local function make_end_row(text, indent_level)
     lbl.Parent = row
 end
 
+local function safe_reg_names(proto, instrs)
+    if names and names.for_proto then
+        local ok, r = pcall(names.for_proto, proto, instrs)
+        if ok and type(r) == "table" then return r end
+    end
+    return {}
+end
+
+local function safe_cfgs_analysis(instrs)
+    if cfgs and cfgs.analyze then
+        local ok, r = pcall(cfgs.analyze, instrs)
+        if ok and type(r) == "table" then return r end
+    end
+    return { labels = {}, ends = {}, indents = {} }
+end
+
 local function render_dis()
     clear_dis()
     local st = patch and patch.state
@@ -308,11 +340,11 @@ local function render_dis()
     end
 
     local proto = st.parsed.protos[st.proto_idx]
-    local analysis = cfgs.analyze(st.instrs)
-    local labels = analysis.labels
-    local ends = analysis.ends
-    local indents = analysis.indents
-    local reg_names = names.for_proto(proto, st.instrs)
+    local analysis = safe_cfgs_analysis(st.instrs)
+    local labels = analysis.labels or {}
+    local ends = analysis.ends or {}
+    local indents = analysis.indents or {}
+    local reg_names = safe_reg_names(proto, st.instrs)
 
     for _, ins in ipairs(st.instrs) do
         local pc = ins.word_idx
@@ -391,16 +423,16 @@ function M.render_all()
 end
 
 function M.start()
-    gui_root = resolve_gui_root()
+    ensure_sg()
 
     bp = Instance.new("Frame")
     bp.Size = UDim2.new(0, 780, 0, 440)
-    bp.Position = UDim2.new(0, 40, 0, 60)
+    bp.Position = UDim2.new(0.5, -390, 0.5, -220)
     bp.BackgroundColor3 = C.bg
     bp.BorderSizePixel = 1
     bp.BorderColor3 = C.border
     bp.Visible = false
-    bp.Parent = gui_root
+    bp.Parent = p_sg
 
     drag(bp)
 
@@ -552,19 +584,42 @@ function M.start()
     bpApply.MouseButton1Click:Connect(function()
         if patch and patch.do_apply then patch.do_apply() end
     end)
+
+    if console and console.log then
+        console.log("panel: created, screenGui parent=" .. tostring(p_sg.Parent), C.dim)
+    end
 end
 
 function M.show()
     if not bp then
         M.start()
     end
-    if bp then
-        gui_root = resolve_gui_root()
-        if bp.Parent ~= gui_root then
-            bp.Parent = gui_root
+    if not bp then
+        if console and console.log then
+            console.log("panel: failed to create", C.err)
         end
-        bp.Visible = true
-        M.render_all()
+        return
+    end
+
+    ensure_sg()
+    if bp.Parent ~= p_sg then
+        bp.Parent = p_sg
+    end
+
+    bp.Visible = true
+    bp.Position = UDim2.new(0.5, -390, 0.5, -220)
+
+    if console and console.log then
+        console.log("panel: visible=" .. tostring(bp.Visible)
+            .. " parent=" .. tostring(bp.Parent and bp.Parent.ClassName)
+            .. " screenGui=" .. tostring(p_sg.Parent and p_sg.Parent.ClassName), C.ok)
+    end
+
+    local ok, err = pcall(M.render_all)
+    if not ok then
+        if console and console.log then
+            console.log("panel render error: " .. tostring(err), C.err)
+        end
     end
 end
 
