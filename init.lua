@@ -5,12 +5,6 @@ local BASE = "https://raw.githubusercontent.com/SUUUUUS00000/Console/main/"
 local MODULES = {
     "console",
     "parser",
-    "disasm",
-    "names",
-    "varflow",
-    "ssa",
-    "expr",
-    "cfgs",
     "decompile",
     "patch",
     "panel",
