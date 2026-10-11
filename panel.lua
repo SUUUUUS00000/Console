@@ -2,7 +2,7 @@ local M = {}
 M.name = "panel"
 
 local BC
-local console, parser, disasm, cfgs, patch, names, varflow
+local console, parser, disasm, cfgs, patch, names, varflow, ssa
 
 local C
 local gui_root
@@ -188,7 +188,163 @@ local function render_hex()
     end
 end
 
-local function make_edit_row(ins, current_value, proto, labels, reg_names, indent, on_change)
+local function fmt_ssa(ins, ssa_data, proto, labels)
+    if not ssa_data then
+        return disasm.fmt(ins, proto, labels, {})
+    end
+
+    local pc = ins.word_idx
+    local reads = ssa_data.read_at[pc] or {}
+    local writes = ssa_data.write_at[pc] or {}
+
+    local function W(reg)
+        local v = writes[reg]
+        if v then return ssa_data.name_of[v] or ("t" .. v) end
+        return "R" .. reg
+    end
+
+    local function R(reg)
+        local v = reads[reg]
+        if v then return ssa_data.name_of[v] or ("t" .. v) end
+        return "R" .. reg
+    end
+
+    local function cstr(i)
+        return disasm.const_str(proto, i)
+    end
+
+    local function L(t)
+        if labels and labels[t] then return labels[t] end
+        return string.format("%+d", t - ins.word_idx - ins.length)
+    end
+
+    local n = ins.name
+    if n == "LOADNIL" then return W(ins.a) .. " = nil" end
+    if n == "LOADB" then
+        if ins.c ~= 0 then
+            return W(ins.a) .. " = " .. (ins.b ~= 0 and "true" or "false") .. " ; goto " .. L(disasm.jump_target(ins))
+        end
+        return W(ins.a) .. " = " .. (ins.b ~= 0 and "true" or "false")
+    end
+    if n == "LOADN" then return W(ins.a) .. " = " .. ins.d end
+    if n == "LOADK" then return W(ins.a) .. " = " .. cstr(ins.d) end
+    if n == "LOADKX" then return W(ins.a) .. " = " .. cstr(ins.aux or 0) end
+    if n == "MOVE" then return W(ins.a) .. " = " .. R(ins.b) end
+    if n == "GETUPVAL" then return W(ins.a) .. " = upval" .. ins.b end
+    if n == "SETUPVAL" then return "upval" .. ins.b .. " = " .. R(ins.a) end
+    if n == "GETGLOBAL" then return W(ins.a) .. " = " .. cstr(ins.aux or 0) end
+    if n == "SETGLOBAL" then return cstr(ins.aux or 0) .. " = " .. R(ins.a) end
+    if n == "GETIMPORT" then return W(ins.a) .. " = " .. cstr(ins.d) end
+    if n == "GETTABLE" then return W(ins.a) .. " = " .. R(ins.b) .. "[" .. R(ins.c) .. "]" end
+    if n == "SETTABLE" then return R(ins.b) .. "[" .. R(ins.c) .. "] = " .. R(ins.a) end
+    if n == "GETTABLEKS" then
+        local c = proto and proto.constants and proto.constants[(ins.aux or 0) + 1]
+        local kn = c and c.value
+        if type(kn) == "string" and kn:match("^[%a_][%w_]*$") then
+            return W(ins.a) .. " = " .. R(ins.b) .. "." .. kn
+        end
+        return W(ins.a) .. " = " .. R(ins.b) .. "[" .. cstr(ins.aux or 0) .. "]"
+    end
+    if n == "SETTABLEKS" then
+        local c = proto and proto.constants and proto.constants[(ins.aux or 0) + 1]
+        local kn = c and c.value
+        if type(kn) == "string" and kn:match("^[%a_][%w_]*$") then
+            return R(ins.b) .. "." .. kn .. " = " .. R(ins.a)
+        end
+        return R(ins.b) .. "[" .. cstr(ins.aux or 0) .. "] = " .. R(ins.a)
+    end
+    if n == "GETTABLEN" then return W(ins.a) .. " = " .. R(ins.b) .. "[" .. (ins.c + 1) .. "]" end
+    if n == "SETTABLEN" then return R(ins.b) .. "[" .. (ins.c + 1) .. "] = " .. R(ins.a) end
+    if n == "NEWTABLE" then return W(ins.a) .. " = {}" end
+    if n == "DUPTABLE" then return W(ins.a) .. " = {dup K" .. ins.d .. "}" end
+    if n == "SETLIST" then return R(ins.a) .. "[..] = {..}" end
+    if n == "NEWCLOSURE" then return W(ins.a) .. " = closure(P" .. ins.d .. ")" end
+    if n == "DUPCLOSURE" then return W(ins.a) .. " = closure(K" .. ins.d .. ")" end
+    if n == "CAPTURE" then return "capture " .. ins.a .. " " .. R(ins.b) end
+    if n == "NAMECALL" then
+        local c = proto and proto.constants and proto.constants[(ins.aux or 0) + 1]
+        local kn = c and c.value or "?"
+        return W(ins.a) .. " = " .. R(ins.b) .. ":" .. tostring(kn) .. "(...)"
+    end
+    if n == "CALL" then
+        local nargs = ins.b - 1
+        local nres = ins.c - 1
+        local args = {}
+        for i = 1, nargs do args[#args + 1] = R(ins.a + i) end
+        local res = nres == 1 and (W(ins.a) .. " = ") or ""
+        return res .. "call(" .. R(ins.a) .. (#args > 0 and (", " .. table.concat(args, ", ")) or "") .. ")"
+    end
+    if n == "RETURN" then
+        local nres = ins.b - 1
+        if nres <= 0 then return "return" end
+        local vals = {}
+        for i = 0, nres - 1 do vals[#vals + 1] = R(ins.a + i) end
+        return "return " .. table.concat(vals, ", ")
+    end
+    if n == "JUMP" then return "goto " .. L(disasm.jump_target(ins)) end
+    if n == "JUMPBACK" then return "back " .. L(disasm.jump_target(ins)) end
+    if n == "JUMPX" then return "gotoX " .. L(disasm.jump_target(ins)) end
+    if n == "JUMPIF" then return "if " .. R(ins.a) .. " then goto " .. L(disasm.jump_target(ins)) end
+    if n == "JUMPIFNOT" then return "if not " .. R(ins.a) .. " then goto " .. L(disasm.jump_target(ins)) end
+    if n == "JUMPIFEQ" then return "if " .. R(ins.a) .. " == " .. R(ins.aux or 0) .. " then goto " .. L(disasm.jump_target(ins)) end
+    if n == "JUMPIFNOTEQ" then return "if " .. R(ins.a) .. " ~= " .. R(ins.aux or 0) .. " then goto " .. L(disasm.jump_target(ins)) end
+    if n == "JUMPIFLE" then return "if " .. R(ins.a) .. " <= " .. R(ins.aux or 0) .. " then goto " .. L(disasm.jump_target(ins)) end
+    if n == "JUMPIFLT" then return "if " .. R(ins.a) .. " < " .. R(ins.aux or 0) .. " then goto " .. L(disasm.jump_target(ins)) end
+    if n == "JUMPIFNOTLE" then return "if " .. R(ins.a) .. " > " .. R(ins.aux or 0) .. " then goto " .. L(disasm.jump_target(ins)) end
+    if n == "JUMPIFNOTLT" then return "if " .. R(ins.a) .. " >= " .. R(ins.aux or 0) .. " then goto " .. L(disasm.jump_target(ins)) end
+    if n == "JUMPXEQKNIL" then
+        local nf = (ins.aux or 0) >= 0x80000000
+        return "if " .. R(ins.a) .. " " .. (nf and "~=" or "==") .. " nil then goto " .. L(disasm.jump_target(ins))
+    end
+    if n == "JUMPXEQKB" then
+        local v = (ins.aux or 0) % 2
+        return "if " .. R(ins.a) .. " == " .. (v == 1 and "true" or "false") .. " then goto " .. L(disasm.jump_target(ins))
+    end
+    if n == "JUMPXEQKN" or n == "JUMPXEQKS" then
+        local k = (ins.aux or 0) % 0x1000000
+        return "if " .. R(ins.a) .. " == " .. cstr(k) .. " then goto " .. L(disasm.jump_target(ins))
+    end
+    if n == "ADD" then return W(ins.a) .. " = " .. R(ins.b) .. " + " .. R(ins.c) end
+    if n == "SUB" then return W(ins.a) .. " = " .. R(ins.b) .. " - " .. R(ins.c) end
+    if n == "MUL" then return W(ins.a) .. " = " .. R(ins.b) .. " * " .. R(ins.c) end
+    if n == "DIV" then return W(ins.a) .. " = " .. R(ins.b) .. " / " .. R(ins.c) end
+    if n == "IDIV" then return W(ins.a) .. " = " .. R(ins.b) .. " // " .. R(ins.c) end
+    if n == "MOD" then return W(ins.a) .. " = " .. R(ins.b) .. " % " .. R(ins.c) end
+    if n == "POW" then return W(ins.a) .. " = " .. R(ins.b) .. " ^ " .. R(ins.c) end
+    if n == "ADDK" then return W(ins.a) .. " = " .. R(ins.b) .. " + " .. cstr(ins.c) end
+    if n == "SUBK" then return W(ins.a) .. " = " .. R(ins.b) .. " - " .. cstr(ins.c) end
+    if n == "MULK" then return W(ins.a) .. " = " .. R(ins.b) .. " * " .. cstr(ins.c) end
+    if n == "DIVK" then return W(ins.a) .. " = " .. R(ins.b) .. " / " .. cstr(ins.c) end
+    if n == "MODK" then return W(ins.a) .. " = " .. R(ins.b) .. " % " .. cstr(ins.c) end
+    if n == "POWK" then return W(ins.a) .. " = " .. R(ins.b) .. " ^ " .. cstr(ins.c) end
+    if n == "SUBRK" then return W(ins.a) .. " = " .. cstr(ins.b) .. " - " .. R(ins.c) end
+    if n == "DIVRK" then return W(ins.a) .. " = " .. cstr(ins.b) .. " / " .. R(ins.c) end
+    if n == "AND" then return W(ins.a) .. " = " .. R(ins.b) .. " and " .. R(ins.c) end
+    if n == "OR" then return W(ins.a) .. " = " .. R(ins.b) .. " or " .. R(ins.c) end
+    if n == "ANDK" then return W(ins.a) .. " = " .. R(ins.b) .. " and " .. cstr(ins.c) end
+    if n == "ORK" then return W(ins.a) .. " = " .. R(ins.b) .. " or " .. cstr(ins.c) end
+    if n == "CONCAT" then
+        local parts = {}
+        for i = ins.b, ins.c do parts[#parts + 1] = R(i) end
+        return W(ins.a) .. " = " .. table.concat(parts, " .. ")
+    end
+    if n == "NOT" then return W(ins.a) .. " = not " .. R(ins.b) end
+    if n == "MINUS" then return W(ins.a) .. " = -" .. R(ins.b) end
+    if n == "LENGTH" then return W(ins.a) .. " = #" .. R(ins.b) end
+    if n == "FORNPREP" then return "for prep -> " .. L(disasm.jump_target(ins)) end
+    if n == "FORNLOOP" then return "for loop -> " .. L(disasm.jump_target(ins)) end
+    if n == "FORGPREP" then return "forgen prep -> " .. L(disasm.jump_target(ins)) end
+    if n == "FORGLOOP" then
+        local cnt = (ins.aux or 0) % 256
+        return "forgen loop -> " .. L(disasm.jump_target(ins)) .. " vars=" .. cnt
+    end
+    if n == "GETVARARGS" then return W(ins.a) .. " = ..." end
+    if n == "PREPVARARGS" then return "prep varargs " .. ins.a end
+
+    return string.format("%s A=%d B=%d C=%d D=%d", n, ins.a, ins.b, ins.c, ins.d)
+end
+
+local function make_edit_row(ins, current_value, proto, labels, indent, on_change, ssa_data)
     local row = Instance.new("Frame")
     row.Size = UDim2.new(1, 0, 0, 22)
     row.BackgroundTransparency = 1
@@ -198,7 +354,7 @@ local function make_edit_row(ins, current_value, proto, labels, reg_names, inden
     lbl.Size = UDim2.new(1, -90, 1, 0)
     lbl.BackgroundTransparency = 1
     lbl.Text = string.rep("  ", indent) .. string.format("%06X  %s",
-        ins.byte_offset, disasm.fmt(ins, proto, labels, reg_names))
+        ins.byte_offset, fmt_ssa(ins, ssa_data, proto, labels))
     local col = C.txt
     if ins.name == "LOADN" or ins.name == "LOADK" then
         col = C.warn
@@ -248,7 +404,7 @@ local function make_edit_row(ins, current_value, proto, labels, reg_names, inden
     table.insert(dis_lines, {f = row, byte_offset = ins.byte_offset, ins = ins})
 end
 
-local function make_read_row(ins, proto, labels, reg_names, indent)
+local function make_read_row(ins, proto, labels, indent, ssa_data)
     local row = Instance.new("Frame")
     row.Size = UDim2.new(1, 0, 0, 18)
     row.BackgroundTransparency = 1
@@ -258,7 +414,7 @@ local function make_read_row(ins, proto, labels, reg_names, indent)
     lbl.Size = UDim2.new(1, 0, 1, 0)
     lbl.BackgroundTransparency = 1
     lbl.Text = string.rep("  ", indent) .. string.format("%06X  %s",
-        ins.byte_offset, disasm.fmt(ins, proto, labels, reg_names))
+        ins.byte_offset, fmt_ssa(ins, ssa_data, proto, labels))
     local col = C.txt
     if ins.name == "LOADN" or ins.name == "LOADK" then
         col = C.warn
@@ -319,20 +475,20 @@ local function make_end_row(text, indent_level)
     lbl.Parent = row
 end
 
-local function safe_reg_names(proto, instrs)
-    if names and names.for_proto then
-        local ok, r = pcall(names.for_proto, proto, instrs)
-        if ok and type(r) == "table" then return r end
-    end
-    return {}
-end
-
-local function safe_cfgs_analysis(instrs)
+local function safe_cfgs(instrs)
     if cfgs and cfgs.analyze then
         local ok, r = pcall(cfgs.analyze, instrs)
         if ok and type(r) == "table" then return r end
     end
     return { labels = {}, ends = {}, indents = {} }
+end
+
+local function safe_ssa(instrs, proto)
+    if ssa and ssa.build then
+        local ok, r = pcall(ssa.build, instrs, proto)
+        if ok and type(r) == "table" then return r end
+    end
+    return nil
 end
 
 local function render_dis()
@@ -351,11 +507,12 @@ local function render_dis()
     end
 
     local proto = st.parsed.protos[st.proto_idx]
-    local analysis = safe_cfgs_analysis(st.instrs)
+    local analysis = safe_cfgs(st.instrs)
     local labels = analysis.labels or {}
     local ends = analysis.ends or {}
     local indents = analysis.indents or {}
-    local reg_names = safe_reg_names(proto, st.instrs)
+
+    local ssa_data = safe_ssa(st.instrs, proto)
 
     for _, ins in ipairs(st.instrs) do
         local pc = ins.word_idx
@@ -372,24 +529,24 @@ local function render_dis()
         end
 
         if ins.name == "LOADN" then
-            make_edit_row(ins, ins.d, proto, labels, reg_names, indent, function(v)
+            make_edit_row(ins, ins.d, proto, labels, indent, function(v)
                 patch.apply_edit_loadn(ins, v)
-            end)
+            end, ssa_data)
         elseif ins.name == "LOADB" then
-            make_edit_row(ins, ins.b, proto, labels, reg_names, indent, function(v)
+            make_edit_row(ins, ins.b, proto, labels, indent, function(v)
                 patch.apply_edit_loadb(ins, v ~= 0)
-            end)
+            end, ssa_data)
         elseif ins.name == "LOADK" then
             local c = proto.constants[ins.d + 1]
             if c and c.kind == 2 and type(c.value) == "number" then
-                make_edit_row(ins, c.value, proto, labels, reg_names, indent, function(v)
+                make_edit_row(ins, c.value, proto, labels, indent, function(v)
                     patch.apply_edit_loadk(ins, v)
-                end)
+                end, ssa_data)
             else
-                make_read_row(ins, proto, labels, reg_names, indent)
+                make_read_row(ins, proto, labels, indent, ssa_data)
             end
         else
-            make_read_row(ins, proto, labels, reg_names, indent)
+            make_read_row(ins, proto, labels, indent, ssa_data)
         end
     end
 
@@ -632,6 +789,7 @@ function M.init(bc)
     patch = bc.modules.patch
     names = bc.modules.names
     varflow = bc.modules.varflow
+    ssa = bc.modules.ssa
     C = console.colors()
 end
 
