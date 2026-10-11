@@ -123,8 +123,6 @@ function M.apply_edit_loadk(ins, v)
     after_edit("patched LOADK pc=" .. ins.word_idx .. " K" .. ins.d .. " -> " .. tostring(v))
 end
 
--- =================== ПОИСК СКРИПТОВ ===================
-
 local function collect_all_scripts()
     local list = {}
     for _, s in ipairs(game:GetDescendants()) do
@@ -157,8 +155,6 @@ function M.search_scripts(query, limit)
     end
     return results
 end
-
--- =================== ЗАГРУЗКА ===================
 
 function M._load_instance(s)
     local C = console.colors()
@@ -276,8 +272,6 @@ function M.list_held()
     end
 end
 
--- =================== ДЕКОМПИЛЯЦИЯ ===================
-
 function M.decompile_full()
     local st = M.state
     if st.user_src then
@@ -298,8 +292,6 @@ function M.decompile_full()
     if not st.original_src then st.original_src = src end
     return src, nil, kind
 end
-
--- =================== АНАЛИЗ ИЗМЕНЕНИЙ ===================
 
 local function extract_literals(src)
     local list = {}
@@ -332,7 +324,7 @@ end
 
 local function parse_literal(tok)
     if not tok or tok == "" then return nil end
-    local s = tok:match("^'(.+)'$") or tok:match('^"(.+)"$')
+    local s = tok:match("^'(.*)'$") or tok:match('^"(.*)"$')
     if s then return "string", s end
     if tok == "true" then return "boolean", true end
     if tok == "false" then return "boolean", false end
@@ -384,22 +376,37 @@ local function patch_upvalue_all(fns, old_val, new_val)
 end
 
 local function collect_all_functions(root_fn)
-    local fns = {root_fn}
-    if typeof(debug.getprotos) ~= "function" then return fns end
-    local ok, protos = pcall(debug.getprotos, root_fn)
-    if not ok or not protos then return fns end
-    for i = 1, #protos do
-        local ok2, actives = pcall(debug.getproto, root_fn, i, true)
-        if ok2 and actives and #actives > 0 then
-            for _, f in ipairs(actives) do
-                if type(f) == "function" then fns[#fns + 1] = f end
+    local fns = {}
+    local visited = {}
+    local queue = {root_fn}
+
+    while #queue > 0 do
+        local fn = table.remove(queue, 1)
+        if type(fn) == "function" and not visited[fn] then
+            visited[fn] = true
+            fns[#fns + 1] = fn
+
+            if typeof(debug.getprotos) == "function" then
+                local ok, protos = pcall(debug.getprotos, fn)
+                if ok and protos then
+                    for i = 1, #protos do
+                        local ok2, actives = pcall(debug.getproto, fn, i, true)
+                        if ok2 and type(actives) == "table" then
+                            for _, f in ipairs(actives) do
+                                if type(f) == "function" and not visited[f] then
+                                    queue[#queue + 1] = f
+                                end
+                            end
+                        elseif ok2 and type(actives) == "function" and not visited[actives] then
+                            queue[#queue + 1] = actives
+                        end
+                    end
+                end
             end
         end
     end
     return fns
 end
-
--- =================== СТРАТЕГИИ ПРИМЕНЕНИЯ ===================
 
 local function strategy_debug(root_fn, changes)
     local C = console.colors()
@@ -463,19 +470,25 @@ local function strategy_hookproto(script, root_fn, new_fn)
         local old_proto = old_protos[i]
         local new_fn_i = new_fns[i + 1]
         if new_fn_i then
-            if typeof(isprotohooked) == "function" then
-                local ok_h, hooked = pcall(isprotohooked, old_proto)
-                if ok_h and hooked then
-                    pcall(restoreproto, old_proto)
+            local info_ok, info = pcall(debug.getinfo, new_fn_i)
+            local nups = (info_ok and info and info.nups) or 0
+            if nups == 0 then
+                if typeof(isprotohooked) == "function" then
+                    local ok_h, hooked = pcall(isprotohooked, old_proto)
+                    if ok_h and hooked then
+                        pcall(restoreproto, old_proto)
+                    end
                 end
-            end
-            local ok_apply, err = pcall(hookproto, old_proto, new_fn_i)
-            if ok_apply then
-                saved[#saved + 1] = old_proto
-                applied = applied + 1
-                console.log("    hookproto[" .. i .. "] OK", C.dim)
+                local ok_apply, err = pcall(hookproto, old_proto, new_fn_i)
+                if ok_apply then
+                    saved[#saved + 1] = old_proto
+                    applied = applied + 1
+                    console.log("    hookproto[" .. i .. "] OK", C.dim)
+                else
+                    console.log("    hookproto[" .. i .. "] failed: " .. tostring(err), C.err)
+                end
             else
-                console.log("    hookproto[" .. i .. "] failed: " .. tostring(err), C.err)
+                console.log("    hookproto[" .. i .. "] skipped (has " .. nups .. " upvalues)", C.dim)
             end
         end
     end
@@ -494,25 +507,25 @@ local function strategy_hookfunction(script, root_fn, new_fn)
     local C = console.colors()
     if typeof(hookfunction) ~= "function" then return false, "no hookfunction" end
 
-    local final_fn = new_fn
-    if typeof(newcclosure) == "function" then
-        pcall(function() final_fn = newcclosure(new_fn) end)
+    local ok_hook, prev = pcall(hookfunction, root_fn, new_fn)
+    if not ok_hook or not prev then
+        if typeof(newcclosure) == "function" then
+            local c_fn
+            pcall(function() c_fn = newcclosure(new_fn) end)
+            if c_fn then
+                ok_hook, prev = pcall(hookfunction, root_fn, c_fn)
+            end
+        end
     end
+    if not ok_hook or not prev then return false, "hookfunction failed: " .. tostring(prev) end
 
-    local prev = hookfunction(root_fn, final_fn)
-    if not prev then return false, "hookfunction returned nil" end
-
-    -- перезапуск скрипта с защитой
     local spawn_ok, spawn_err = pcall(function()
         local co = coroutine.create(root_fn)
-        local ok_run, run_err = coroutine.resume(co)
+        local ok_run, run_err = coroutine.resume(co, script)
         if not ok_run then
             error(run_err)
         end
         task.wait(0.05)
-        if coroutine.status(co) == "dead" then
-            return
-        end
     end)
     if not spawn_ok then
         pcall(hookfunction, root_fn, prev)
@@ -528,7 +541,51 @@ local function strategy_hookfunction(script, root_fn, new_fn)
     return true
 end
 
--- =================== ГЛАВНАЯ ФУНКЦИЯ ===================
+local function prepare_compiled_fn(fn, script, root_fn)
+    if not fn or type(fn) ~= "function" then return fn end
+
+    local s_env = {}
+    if typeof(getsenv) == "function" then
+        pcall(function()
+            local se = getsenv(script)
+            if type(se) == "table" then s_env = se end
+        end)
+    end
+    if not next(s_env) and typeof(getfenv) == "function" then
+        pcall(function()
+            local fe = getfenv(root_fn)
+            if type(fe) == "table" then s_env = fe end
+        end)
+    end
+
+    local base_env = (getgenv and getgenv()) or getfenv()
+    local custom_env = setmetatable({
+        script = script,
+    }, {
+        __index = function(_, k)
+            if k == "script" then return script end
+            local v = s_env[k]
+            if v ~= nil then return v end
+            return base_env[k]
+        end,
+        __newindex = function(_, k, v)
+            if s_env[k] ~= nil then
+                s_env[k] = v
+            else
+                rawset(s_env, k, v)
+            end
+        end,
+    })
+
+    pcall(setfenv, fn, custom_env)
+    pcall(function()
+        local fe = getfenv(fn)
+        if fe and fe.script == nil then
+            fe.script = script
+        end
+    end)
+    return fn
+end
 
 function M.apply_edit(script, new_bytes)
     local C = console.colors()
@@ -537,12 +594,39 @@ function M.apply_edit(script, new_bytes)
     local root_fn = getscriptclosure(script)
     if not root_fn then return false, "no closure" end
 
+    if not st.original_src and st.baseline and decompile and decompile.decompile_best then
+        pcall(function()
+            local orig = decompile.decompile_best(st.baseline)
+            if orig then st.original_src = orig end
+        end)
+    end
+
     local src = M.decompile_full()
     if not src then
         return false, "decompile failed"
     end
 
-    local new_fn, load_err = loadstring(src, "@" .. script.Name)
+    local new_fn = nil
+    local load_err = nil
+
+    local wrapped_code = "return function(script)\nreturn function(...)\n" .. src .. "\nend\nend"
+    local factory, wrap_err = loadstring(wrapped_code, "@" .. script.Name)
+    if factory then
+        prepare_compiled_fn(factory, script, root_fn)
+        local ok_make, inner_fn = pcall(factory, script)
+        if ok_make and type(inner_fn) == "function" then
+            new_fn = prepare_compiled_fn(inner_fn, script, root_fn)
+        end
+    end
+
+    if not new_fn then
+        local raw_fn, err = loadstring(src, "@" .. script.Name)
+        if raw_fn then
+            new_fn = prepare_compiled_fn(raw_fn, script, root_fn)
+        else
+            load_err = err or wrap_err
+        end
+    end
 
     if not new_fn then
         local info_ok, info = pcall(debug.getinfo, root_fn)
@@ -552,22 +636,23 @@ function M.apply_edit(script, new_bytes)
             for i = 1, nups do params[#params + 1] = "upval" .. (i - 1) end
             local wrapped = "return function(" .. table.concat(params, ", ") .. ")\n"
                 .. src .. "\nend"
-            local factory, wrap_err = loadstring(wrapped, "@" .. script.Name .. "_factory")
-            if factory then
+            local factory2, wrap2_err = loadstring(wrapped, "@" .. script.Name .. "_factory")
+            if factory2 then
+                prepare_compiled_fn(factory2, script, root_fn)
                 local ups = {}
                 for i = 1, nups do
                     local _, val = debug.getupvalue(root_fn, i)
                     ups[i] = val
                 end
-                local ok_call, made = pcall(factory, table.unpack(ups))
+                local ok_call, made = pcall(factory2, table.unpack(ups))
                 if ok_call and made then
-                    new_fn = made
+                    new_fn = prepare_compiled_fn(made, script, root_fn)
                 else
                     return false, "factory failed: " .. tostring(made)
                 end
             else
                 return false, "compile: " .. tostring(load_err)
-                    .. " | factory: " .. tostring(wrap_err)
+                    .. " | factory: " .. tostring(wrap2_err)
             end
         end
     end
@@ -665,8 +750,6 @@ function M.revert()
     end
     console.log("reverted", C.warn)
 end
-
--- =================== КОМАНДЫ ===================
 
 function M.findnum_cmd(a)
     local C = console.colors()
