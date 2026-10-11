@@ -24,6 +24,8 @@ local C = {
     warn   = px(230, 180, 90),
     hex    = px(200, 200, 200),
     button = px(55, 55, 58),
+    button_hover = px(72, 72, 78),
+    suggest_bg = px(28, 28, 30),
 }
 
 local FONT = Enum.Font.Arcade
@@ -37,6 +39,10 @@ local commands = {}
 local gui_root, sg
 local main, inp, minBtn, hbar, vbar
 local panel, hintBar, hl, out, sb
+
+local suggest_frame, suggest_scroll, suggest_list
+local suggest_visible = false
+local suggest_clicked = false
 
 local function drag(frame)
     frame.InputBegan:Connect(function(i)
@@ -111,6 +117,168 @@ function M.register(name, handler, description)
     commands[name:lower()] = {handler = handler, description = description or ""}
 end
 
+--========= ПОДСКАЗКИ =========
+
+local function hide_suggestions()
+    if not suggest_frame then return end
+    suggest_frame.Visible = false
+    suggest_visible = false
+end
+
+local function clear_suggestions()
+    if not suggest_list then return end
+    for _, v in ipairs(suggest_scroll:GetChildren()) do
+        if v:IsA("TextButton") then v:Destroy() end
+    end
+end
+
+local function make_suggestion_row(text, subtitle, on_click)
+    local row = Instance.new("TextButton")
+    row.Size = UDim2.new(1, 0, 0, 24)
+    row.BackgroundColor3 = C.suggest_bg
+    row.BorderSizePixel = 0
+    row.Text = ""
+    row.AutoButtonColor = false
+    row.TextXAlignment = Enum.TextXAlignment.Left
+    row.Parent = suggest_scroll
+
+    local main_lbl = Instance.new("TextLabel")
+    main_lbl.Size = UDim2.new(1, -10, 1, 0)
+    main_lbl.Position = UDim2.new(0, 8, 0, 0)
+    main_lbl.BackgroundTransparency = 1
+    main_lbl.Text = text
+    main_lbl.TextColor3 = C.txt
+    main_lbl.Font = FONT
+    main_lbl.TextSize = 13
+    main_lbl.TextXAlignment = Enum.TextXAlignment.Left
+    main_lbl.TextYAlignment = Enum.TextYAlignment.Center
+    main_lbl.TextTruncate = Enum.TextTruncate.AtEnd
+    main_lbl.Parent = row
+
+    if subtitle and subtitle ~= "" then
+        main_lbl.Size = UDim2.new(0.55, 0, 1, 0)
+        local sub = Instance.new("TextLabel")
+        sub.Size = UDim2.new(0.45, -10, 1, 0)
+        sub.Position = UDim2.new(0.55, 0, 0, 0)
+        sub.BackgroundTransparency = 1
+        sub.Text = subtitle
+        sub.TextColor3 = C.hint
+        sub.Font = FONT
+        sub.TextSize = 12
+        sub.TextXAlignment = Enum.TextXAlignment.Right
+        sub.TextYAlignment = Enum.TextYAlignment.Center
+        sub.TextTruncate = Enum.TextTruncate.AtStart
+        sub.Parent = row
+    end
+
+    row.MouseEnter:Connect(function()
+        row.BackgroundColor3 = C.button_hover
+    end)
+    row.MouseLeave:Connect(function()
+        row.BackgroundColor3 = C.suggest_bg
+    end)
+    row.MouseButton1Click:Connect(function()
+        suggest_clicked = true
+        on_click()
+    end)
+
+    return row
+end
+
+local function show_suggestions(rows)
+    clear_suggestions()
+    if #rows == 0 then
+        hide_suggestions()
+        return
+    end
+    local max_visible = 6
+    local shown = math.min(#rows, max_visible)
+    suggest_scroll.CanvasSize = UDim2.new(0, 0, 0, #rows * 24)
+    suggest_frame.Size = UDim2.new(1, 0, 0, shown * 24 + 4)
+    suggest_frame.Visible = true
+    suggest_visible = true
+end
+
+local function update_suggestions()
+    if not suggest_frame then return end
+    local txt = inp.Text
+    if txt == "" then
+        hide_suggestions()
+        return
+    end
+
+    local space = txt:find(" ", 1, true)
+
+    if not space then
+        local prefix = txt:lower()
+        local names = {}
+        for name in pairs(commands) do names[#names + 1] = name end
+        table.sort(names)
+        local rows = {}
+        for _, name in ipairs(names) do
+            if name:sub(1, #prefix) == prefix then
+                rows[#rows + 1] = { name = name, desc = commands[name].description }
+            end
+        end
+        local btns = {}
+        for _, r in ipairs(rows) do
+            btns[#btns + 1] = make_suggestion_row(r.name, r.desc, function()
+                inp.Text = r.name .. " "
+                inp:CaptureFocus()
+                suggest_clicked = false
+                task.defer(update_suggestions)
+            end)
+        end
+        show_suggestions(btns)
+        return
+    end
+
+    local cmd = txt:sub(1, space - 1):lower()
+    local arg = txt:sub(space + 1):lower()
+
+    if cmd == "load" or cmd == "find" or cmd == "loadpath" or cmd == "loadin" then
+        if not BC.modules.patch or not BC.modules.patch.search_scripts then
+            hide_suggestions()
+            return
+        end
+        local results = BC.modules.patch.search_scripts(arg, 50)
+        local btns = {}
+        for _, s in ipairs(results) do
+            local name = s:GetFullName()
+            btns[#btns + 1] = make_suggestion_row(name, s.ClassName, function()
+                if cmd == "load" then
+                    inp.Text = "loadpath " .. name
+                elseif cmd == "loadpath" then
+                    inp.Text = "loadpath " .. name
+                elseif cmd == "loadin" then
+                    inp.Text = "loadpath " .. name
+                else
+                    inp.Text = "loadpath " .. name
+                end
+                inp:CaptureFocus()
+                suggest_clicked = false
+                task.defer(function()
+                    local a = {}
+                    for x in inp.Text:gmatch("%S+") do a[#a + 1] = x end
+                    M.log("> " .. inp.Text, C.accent)
+                    local handler = commands[a[1]:lower()]
+                    if handler then
+                        pcall(handler.handler, a, inp.Text)
+                    end
+                    inp.Text = ""
+                    hide_suggestions()
+                end)
+            end)
+        end
+        show_suggestions(btns)
+        return
+    end
+
+    hide_suggestions()
+end
+
+--========= SUBMIT =========
+
 local function submit()
     if not inp then return end
     local txt = inp.Text
@@ -128,7 +296,10 @@ local function submit()
         end
     end
     inp.Text = ""
+    hide_suggestions()
 end
+
+--========= START =========
 
 function M.start(bc)
     BC = bc
@@ -149,6 +320,7 @@ function M.start(bc)
     main.BackgroundColor3 = C.bar
     main.BorderColor3 = C.border
     main.BorderSizePixel = 2
+    main.ZIndex = 50
     main.Parent = sg
 
     inp = Instance.new("TextBox")
@@ -164,6 +336,7 @@ function M.start(bc)
     inp.TextXAlignment = Enum.TextXAlignment.Left
     inp.TextYAlignment = Enum.TextYAlignment.Center
     inp.ClearTextOnFocus = false
+    inp.ZIndex = 51
     inp.Parent = main
 
     minBtn = Instance.new("TextButton")
@@ -173,6 +346,7 @@ function M.start(bc)
     minBtn.BorderSizePixel = 0
     minBtn.Text = ""
     minBtn.AutoButtonColor = false
+    minBtn.ZIndex = 51
     minBtn.Parent = main
 
     hbar = Instance.new("Frame")
@@ -192,11 +366,40 @@ function M.start(bc)
     vbar.Visible = false
     vbar.Parent = minBtn
 
+    -- suggestions panel
+    suggest_frame = Instance.new("Frame")
+    suggest_frame.Size = UDim2.new(1, 0, 0, 0)
+    suggest_frame.Position = UDim2.new(0, 0, 0, 32)
+    suggest_frame.BackgroundColor3 = C.suggest_bg
+    suggest_frame.BorderColor3 = C.border
+    suggest_frame.BorderSizePixel = 2
+    suggest_frame.Visible = false
+    suggest_frame.ZIndex = 60
+    suggest_frame.ClipsDescendants = true
+    suggest_frame.Parent = sg
+
+    suggest_scroll = Instance.new("ScrollingFrame")
+    suggest_scroll.Size = UDim2.new(1, -4, 1, -4)
+    suggest_scroll.Position = UDim2.new(0, 2, 0, 2)
+    suggest_scroll.BackgroundTransparency = 1
+    suggest_scroll.BorderSizePixel = 0
+    suggest_scroll.ScrollBarThickness = 4
+    suggest_scroll.ScrollBarImageColor3 = C.border
+    suggest_scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    suggest_scroll.ZIndex = 61
+    suggest_scroll.Parent = suggest_frame
+
+    suggest_list = Instance.new("UIListLayout")
+    suggest_list.Padding = UDim.new(0, 0)
+    suggest_list.SortOrder = Enum.SortOrder.LayoutOrder
+    suggest_list.Parent = suggest_scroll
+
     panel = Instance.new("Frame")
     panel.Size = UDim2.new(1, 0, 0, 200)
     panel.Position = UDim2.new(0, 0, 0, 30)
     panel.BackgroundTransparency = 1
     panel.ClipsDescendants = true
+    panel.ZIndex = 40
     panel.Parent = sg
 
     hintBar = Instance.new("Frame")
@@ -206,13 +409,14 @@ function M.start(bc)
     hintBar.BorderColor3 = C.border
     hintBar.BorderSizePixel = 0
     hintBar.ClipsDescendants = true
+    hintBar.ZIndex = 41
     hintBar.Parent = panel
 
     hl = Instance.new("TextLabel")
     hl.Size = UDim2.new(1, -12, 1, 0)
     hl.Position = UDim2.new(0, 6, 0, 0)
     hl.BackgroundTransparency = 1
-    hl.Text = "help load scripts held findnum setnum edit apply revert gui src proto close clear"
+    hl.Text = "help load loadpath loadin find scripts held findnum setnum edit apply revert gui src proto close clear"
     hl.TextColor3 = C.hint
     hl.Font = FONT
     hl.TextSize = 12
@@ -227,6 +431,7 @@ function M.start(bc)
     out.BorderColor3 = C.border
     out.BorderSizePixel = 0
     out.ClipsDescendants = true
+    out.ZIndex = 41
     out.Parent = panel
 
     sb = Instance.new("ScrollingFrame")
@@ -252,8 +457,25 @@ function M.start(bc)
 
     drag(main)
 
+    inp:GetPropertyChangedSignal("Text"):Connect(function()
+        update_suggestions()
+    end)
+
+    inp.Focused:Connect(function()
+        task.defer(update_suggestions)
+    end)
+
     inp.FocusLost:Connect(function(enter)
-        if enter then submit() end
+        if enter then
+            submit()
+        else
+            task.delay(0.15, function()
+                if not suggest_clicked then
+                    hide_suggestions()
+                end
+                suggest_clicked = false
+            end)
+        end
     end)
 
     minBtn.MouseButton1Click:Connect(function()
@@ -281,7 +503,35 @@ function M.start(bc)
         if BC.modules.patch and BC.modules.patch.load_script then
             BC.modules.patch.load_script(a[2])
         end
-    end, "load bytecode")
+    end, "load by name")
+
+    M.register("loadpath", function(a)
+        if not a[2] then M.log("usage: loadpath <path>", C.err) return end
+        if BC.modules.patch and BC.modules.patch.load_path then
+            BC.modules.patch.load_path(a[2])
+        end
+    end, "load by full path")
+
+    M.register("loadin", function(a)
+        if not a[2] or not a[3] then
+            M.log("usage: loadin <container> <script>", C.err)
+            return
+        end
+        if BC.modules.patch and BC.modules.patch.load_script_in then
+            BC.modules.patch.load_script_in(a[2], a[3])
+        end
+    end, "load script inside container")
+
+    M.register("find", function(a)
+        local query = a[2] or ""
+        if not BC.modules.patch or not BC.modules.patch.search_scripts then return end
+        local results = BC.modules.patch.search_scripts(query, 50)
+        M.log("found " .. #results .. " scripts:", C.accent)
+        for i, s in ipairs(results) do
+            M.log("  [" .. i .. "] " .. s:GetFullName() .. "  (" .. s.ClassName .. ")", C.txt)
+        end
+        M.log("use: loadpath <full path>", C.hint)
+    end, "find scripts by name substring")
 
     M.register("scripts", function()
         if BC.modules.patch and BC.modules.patch.list_scripts then
