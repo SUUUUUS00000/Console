@@ -20,6 +20,7 @@ local btn_decompile, btn_edit, btn_revert, btn_exit, btn_save
 local mode = "view"
 local cached_src = nil
 local cached_for_bytecode = nil
+local original_src = nil
 local is_dirty = false
 local loading_edit = false
 local is_focused = false
@@ -29,33 +30,24 @@ local DRAG_THRESHOLD = 6
 
 local u = game:GetService("UserInputService")
 local cam = workspace.CurrentCamera
-local textService = game:GetService("TextService")
 
 --=====================================================================
 -- FE PALETTE
 --=====================================================================
 
-local function px(r, g, b)
-    return Color3.fromRGB(r, g, b)
-end
+local function px(r, g, b) return Color3.fromRGB(r, g, b) end
 
 local P = {
-    bg         = px(30, 30, 30),
-    topbar     = px(37, 37, 38),
-    editor     = px(24, 24, 24),
-    gutter     = px(35, 35, 38),
-    gutter_ln  = px(133, 133, 133),
-    button     = px(55, 55, 58),
-    button_pri = px(0, 122, 204),
-    border     = px(80, 80, 80),
-    txt        = px(220, 220, 220),
-    title      = px(200, 200, 200),
-    dim        = px(140, 140, 145),
-    hint       = px(85, 85, 90),
-    ok         = px(120, 200, 120),
-    warn       = px(230, 180, 90),
-    err        = px(230, 95, 95),
-    scroll     = px(150, 150, 150),
+    bg = px(30,30,30), topbar = px(37,37,38), editor = px(24,24,24),
+    gutter = px(35,35,38), gutter_ln = px(133,133,133),
+    button = px(55,55,58), button_pri = px(0,122,204),
+    border = px(80,80,80), txt = px(220,220,220), title = px(200,200,200),
+    dim = px(140,140,145), hint = px(85,85,90),
+    ok = px(120,200,120), warn = px(230,180,90), err = px(230,95,95),
+    scroll = px(150,150,150),
+    marker_changed = px(220,180,60),
+    marker_added = px(90,200,120),
+    marker_removed = px(220,90,90),
 }
 
 local FONT = Enum.Font.Arcade
@@ -88,30 +80,14 @@ local BUILTINS = {
 }
 
 local HL = {
-    keyword = "#569CD6",
-    string  = "#CE9178",
-    number  = "#B5CEA8",
-    comment = "#6A9955",
-    ident   = "#DCDCDC",
-    builtin = "#4EC9B0",
-    op      = "#DCDCDC",
+    keyword = "#569CD6", string = "#CE9178", number = "#B5CEA8",
+    comment = "#6A9955", ident = "#DCDCDC", builtin = "#4EC9B0", op = "#DCDCDC",
 }
 
-local function is_ws(c)
-    return c == " " or c == "\t" or c == "\n" or c == "\r"
-end
-
-local function is_digit(c)
-    return c >= "0" and c <= "9"
-end
-
-local function is_alpha(c)
-    return (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or c == "_"
-end
-
-local function is_alnum(c)
-    return is_alpha(c) or is_digit(c)
-end
+local function is_ws(c) return c==" " or c=="\t" or c=="\n" or c=="\r" end
+local function is_digit(c) return c>="0" and c<="9" end
+local function is_alpha(c) return (c>="a" and c<="z") or (c>="A" and c<="Z") or c=="_" end
+local function is_alnum(c) return is_alpha(c) or is_digit(c) end
 
 local function tokenize(src)
     local tokens = {}
@@ -121,21 +97,21 @@ local function tokenize(src)
         if is_ws(c) then
             local j = i
             while j <= n and is_ws(src:sub(j, j)) do j = j + 1 end
-            tokens[#tokens + 1] = {t = "ws", v = src:sub(i, j - 1)}
+            tokens[#tokens + 1] = {t="ws", v=src:sub(i, j - 1)}
             i = j
         elseif c == "-" and src:sub(i + 1, i + 1) == "-" then
             if src:sub(i, i + 3) == "--[[" then
                 local j = src:find("]]", i + 4, true)
                 if j then
-                    tokens[#tokens + 1] = {t = "comment", v = src:sub(i, j + 1)}
+                    tokens[#tokens + 1] = {t="comment", v=src:sub(i, j + 1)}
                     i = j + 2
                 else
-                    tokens[#tokens + 1] = {t = "comment", v = src:sub(i)}
+                    tokens[#tokens + 1] = {t="comment", v=src:sub(i)}
                     i = n + 1
                 end
             else
                 local j = src:find("\n", i, true) or (n + 1)
-                tokens[#tokens + 1] = {t = "comment", v = src:sub(i, j - 1)}
+                tokens[#tokens + 1] = {t="comment", v=src:sub(i, j - 1)}
                 i = j
             end
         elseif c == '"' or c == "'" then
@@ -146,40 +122,12 @@ local function tokenize(src)
                 elseif cc == c then j = j + 1; break
                 else j = j + 1 end
             end
-            tokens[#tokens + 1] = {t = "string", v = src:sub(i, j - 1)}
-            i = j
-        elseif c == "`" then
-            local j = i + 1
-            while j <= n do
-                local cc = src:sub(j, j)
-                if cc == "\\" then j = j + 2
-                elseif cc == "`" then j = j + 1; break
-                else j = j + 1 end
-            end
-            tokens[#tokens + 1] = {t = "string", v = src:sub(i, j - 1)}
+            tokens[#tokens + 1] = {t="string", v=src:sub(i, j - 1)}
             i = j
         elseif is_digit(c) or (c == "." and is_digit(src:sub(i + 1, i + 1))) then
             local j = i
-            if c == "0" and src:sub(i + 1, i + 1):lower() == "x" then
-                j = i + 2
-                while j <= n and src:sub(j, j):match("[%x]") do j = j + 1 end
-                if src:sub(j, j) == "i" then j = j + 1 end
-            else
-                local seen_dot, seen_e = false, false
-                while j <= n do
-                    local cc = src:sub(j, j)
-                    if is_digit(cc) then j = j + 1
-                    elseif cc == "." and not seen_dot and not seen_e then
-                        seen_dot = true; j = j + 1
-                    elseif (cc == "e" or cc == "E") and not seen_e then
-                        seen_e = true; j = j + 1
-                        if src:sub(j, j) == "+" or src:sub(j, j) == "-" then j = j + 1 end
-                    elseif cc == "i" and not seen_e and not seen_dot then
-                        j = j + 1; break
-                    else break end
-                end
-            end
-            tokens[#tokens + 1] = {t = "number", v = src:sub(i, j - 1)}
+            while j <= n and (is_digit(src:sub(j,j)) or src:sub(j,j)=="." or src:sub(j,j)=="x" or src:sub(j,j)=="X" or src:sub(j,j):match("[a-fA-F]")) do j = j + 1 end
+            tokens[#tokens + 1] = {t="number", v=src:sub(i, j - 1)}
             i = j
         elseif is_alpha(c) then
             local j = i
@@ -188,20 +136,15 @@ local function tokenize(src)
             local t = "ident"
             if KEYWORDS[word] then t = "keyword"
             elseif BUILTINS[word] then t = "builtin" end
-            tokens[#tokens + 1] = {t = t, v = word}
+            tokens[#tokens + 1] = {t=t, v=word}
             i = j
         else
-            local three = src:sub(i, i + 2)
             local two = src:sub(i, i + 1)
-            if three == "..." then
-                tokens[#tokens + 1] = {t = "op", v = "..."}
-                i = i + 3
-            elseif two == "==" or two == "~=" or two == "<=" or two == ">="
-                or two == ".." or two == "//" or two == "::" or two == "->" then
-                tokens[#tokens + 1] = {t = "op", v = two}
+            if two == "==" or two == "~=" or two == "<=" or two == ">=" or two == ".." then
+                tokens[#tokens + 1] = {t="op", v=two}
                 i = i + 2
             else
-                tokens[#tokens + 1] = {t = "op", v = c}
+                tokens[#tokens + 1] = {t="op", v=c}
                 i = i + 1
             end
         end
@@ -217,55 +160,93 @@ local function escape_rich(s)
 end
 
 local function highlight(src)
-    if #src > 200000 then
-        return "-- source too long to highlight (" .. #src .. " bytes)"
-    end
-    local tokens = tokenize(src)
+    if #src > 200000 then return "-- source too large" end
     local parts = {}
-    for _, tok in ipairs(tokens) do
+    for _, tok in ipairs(tokenize(src)) do
         if tok.t == "ws" then
             parts[#parts + 1] = tok.v
         else
-            local color = HL[tok.t] or HL.ident
-            parts[#parts + 1] = '<font color="' .. color .. '">' .. escape_rich(tok.v) .. '</font>'
+            parts[#parts + 1] = '<font color="' .. (HL[tok.t] or HL.ident) .. '">' .. escape_rich(tok.v) .. '</font>'
         end
     end
     return table.concat(parts)
 end
 
 --=====================================================================
+-- DIFF: сравнение строк оригинала и текущего
+--=====================================================================
+
+local function split_lines(s)
+    local t = {}
+    for line in (s .. "\n"):gmatch("([^\n]*)\n") do t[#t + 1] = line end
+    return t
+end
+
+-- Возвращает массив статусов: "same", "changed", "added", "removed"
+local function compute_line_diff(orig, curr)
+    local o = split_lines(orig)
+    local c = split_lines(curr)
+    local status = {}
+    local om = {}
+    local cm = {}
+    for i, l in ipairs(o) do om[l] = om[l] or {}; table.insert(om[l], i) end
+    for i, l in ipairs(c) do cm[l] = cm[l] or {}; table.insert(cm[l], i) end
+    local oi, ci = 1, 1
+    while oi <= #o or ci <= #c do
+        if oi <= #o and ci <= #c and o[oi] == c[ci] then
+            status[ci] = "same"
+            oi = oi + 1
+            ci = ci + 1
+        elseif ci <= #c and cm[c[ci]] and #cm[c[ci]] > 0 then
+            -- строка есть в оригинале где-то дальше — значит добавленная
+            status[ci] = "added"
+            ci = ci + 1
+        elseif oi <= #o then
+            -- строка в оригинале есть, но в текущем её нет — удалённая (пропускаем, но помечаем следующую как сдвиг)
+            oi = oi + 1
+        else
+            if ci <= #c then status[ci] = "added" end
+            ci = ci + 1
+        end
+    end
+    for i = 1, #c do
+        if not status[i] then status[i] = "changed" end
+    end
+    return status
+end
+
+--=====================================================================
 -- FE-STYLE BUTTON
 --=====================================================================
 
-local function mk_button(parent, text, w, x, y, primary)
+local function mk_button(parent, text, w, x, y)
     local b = Instance.new("TextButton")
     b.Size = UDim2.new(0, w, 0, 26)
     b.Position = UDim2.new(0, x, 0, y)
-    b.BackgroundColor3 = primary and P.button_pri or P.button
+    b.BackgroundColor3 = P.button
     b.BorderSizePixel = 0
     b.Text = text
-    b.TextColor3 = px(255, 255, 255)
+    b.TextColor3 = px(255,255,255)
     b.Font = FONT
     b.TextSize = 15
-    b.TextScaled = false
     b.AutoButtonColor = false
     b.Parent = parent
     return b
 end
 
 local function setup_scroll(sf)
-    sf.ScrollBarThickness = 8
+    sf.ScrollBarThickness = 10
     sf.ScrollBarImageColor3 = P.scroll
-    sf.ScrollBarImageTransparency = 0.2
+    sf.ScrollBarImageTransparency = 0.15
     sf.ElasticBehavior = Enum.ElasticBehavior.Never
+    sf.ScrollingDirection = Enum.ScrollingDirection.Y
 end
 
 local function drag_begin(frame)
     frame.InputBegan:Connect(function(i)
         if i.UserInputType == Enum.UserInputType.MouseButton1
             or i.UserInputType == Enum.UserInputType.Touch then
-            dragOn = true
-            dragMoved = false
+            dragOn = true; dragMoved = false
             dragFrame = bp
             dragStart = i.Position
             dragPos = bp.Position
@@ -285,10 +266,8 @@ u.InputChanged:Connect(function(i)
         local ny = dragPos.Y.Offset + d.Y
         local vp = cam.ViewportSize
         local sz = dragFrame.AbsoluteSize
-        if nx < -(sz.X - 60) then nx = -(sz.X - 60) end
-        if nx > vp.X - 60 then nx = vp.X - 60 end
-        if ny < -6 then ny = -6 end
-        if ny > vp.Y - 40 then ny = vp.Y - 40 end
+        nx = math.clamp(nx, -(sz.X - 60), vp.X - 60)
+        ny = math.clamp(ny, -6, vp.Y - 40)
         dragFrame.Position = UDim2.new(0, nx, 0, ny)
     end
 end)
@@ -296,9 +275,7 @@ end)
 u.InputEnded:Connect(function(i)
     if i.UserInputType == Enum.UserInputType.MouseButton1
         or i.UserInputType == Enum.UserInputType.Touch then
-        dragOn = false
-        dragMoved = false
-        dragFrame = nil
+        dragOn = false; dragMoved = false; dragFrame = nil
     end
 end)
 
@@ -332,14 +309,10 @@ local function render_hex()
         local chunk = string.sub(d, i, i + 15)
         local hp = {}
         for j = 1, #chunk do hp[j] = string.format("%02X", string.byte(chunk, j)) end
-        local hx = table.concat(hp, " ")
-        local asc = chunk:gsub("[^%g ]", ".")
-
         local r = Instance.new("Frame")
         r.Size = UDim2.new(1, 0, 0, LINE_H)
         r.BackgroundTransparency = 1
         r.Parent = left_scroll
-
         local addr = Instance.new("TextLabel")
         addr.Size = UDim2.new(0, 50, 1, 0)
         addr.BackgroundTransparency = 1
@@ -348,35 +321,30 @@ local function render_hex()
         addr.Font = FONT
         addr.TextSize = TSIZE
         addr.TextXAlignment = Enum.TextXAlignment.Left
-        addr.TextYAlignment = Enum.TextYAlignment.Top
         addr.LineHeight = 1
         addr.Parent = r
-
         local bytes = Instance.new("TextLabel")
         bytes.Size = UDim2.new(1, -100, 1, 0)
         bytes.Position = UDim2.new(0, 52, 0, 0)
         bytes.BackgroundTransparency = 1
-        bytes.Text = hx
+        bytes.Text = table.concat(hp, " ")
         bytes.TextColor3 = P.txt
         bytes.Font = FONT
         bytes.TextSize = TSIZE
         bytes.TextXAlignment = Enum.TextXAlignment.Left
-        bytes.TextYAlignment = Enum.TextYAlignment.Top
         bytes.LineHeight = 1
         bytes.Parent = r
-
-        local asc_lbl = Instance.new("TextLabel")
-        asc_lbl.Size = UDim2.new(0, 44, 1, 0)
-        asc_lbl.Position = UDim2.new(1, -48, 0, 0)
-        asc_lbl.BackgroundTransparency = 1
-        asc_lbl.Text = asc
-        asc_lbl.TextColor3 = P.hint
-        asc_lbl.Font = FONT
-        asc_lbl.TextSize = TSIZE
-        asc_lbl.TextXAlignment = Enum.TextXAlignment.Left
-        asc_lbl.TextYAlignment = Enum.TextYAlignment.Top
-        asc_lbl.LineHeight = 1
-        asc_lbl.Parent = r
+        local asc = Instance.new("TextLabel")
+        asc.Size = UDim2.new(0, 44, 1, 0)
+        asc.Position = UDim2.new(1, -48, 0, 0)
+        asc.BackgroundTransparency = 1
+        asc.Text = chunk:gsub("[^%g ]", ".")
+        asc.TextColor3 = P.hint
+        asc.Font = FONT
+        asc.TextSize = TSIZE
+        asc.TextXAlignment = Enum.TextXAlignment.Left
+        asc.LineHeight = 1
+        asc.Parent = r
     end
 end
 
@@ -387,26 +355,40 @@ local function get_source(force)
     if not force and cached_src and cached_for_bytecode == st.working then
         return cached_src, "cache"
     end
-    if not decompile or not decompile.decompile_best then
-        return nil, "no decompiler"
-    end
+    if not decompile or not decompile.decompile_best then return nil, "no decompiler" end
     local ok, result, kind, err = pcall(decompile.decompile_best, st.working)
-    if not ok then return nil, "decompile crash: " .. tostring(result) end
-    if not result then return nil, "decompile failed: " .. tostring(err) end
+    if not ok then return nil, "crash: " .. tostring(result) end
+    if not result then return nil, "failed: " .. tostring(err) end
     cached_src = result
     cached_for_bytecode = st.working
+    if not original_src then original_src = result end
     return result, kind
 end
 
-local function update_gutter(src)
+local function update_gutter(src, diff_status)
     if not right_gutter_inner then return end
     for _, v in ipairs(right_gutter_inner:GetChildren()) do
-        if v:IsA("TextLabel") then v:Destroy() end
+        if v:IsA("TextLabel") or v:IsA("Frame") then v:Destroy() end
     end
     local n = 1
     for _ in src:gmatch("\n") do n = n + 1 end
     if n > 3000 then n = 3000 end
+
     for i = 1, n do
+        -- маркер изменения
+        if diff_status and diff_status[i] and diff_status[i] ~= "same" then
+            local color = P.marker_changed
+            if diff_status[i] == "added" then color = P.marker_added end
+            if diff_status[i] == "removed" then color = P.marker_removed end
+            local marker = Instance.new("Frame")
+            marker.Size = UDim2.new(0, 3, 0, LINE_H)
+            marker.Position = UDim2.new(0, 0, 0, (i - 1) * LINE_H)
+            marker.BackgroundColor3 = color
+            marker.BorderSizePixel = 0
+            marker.ZIndex = 7
+            marker.Parent = right_gutter_inner
+        end
+
         local lbl = Instance.new("TextLabel")
         lbl.Size = UDim2.new(1, -4, 0, LINE_H)
         lbl.Position = UDim2.new(0, 0, 0, (i - 1) * LINE_H)
@@ -416,8 +398,8 @@ local function update_gutter(src)
         lbl.Font = FONT
         lbl.TextSize = TSIZE
         lbl.TextXAlignment = Enum.TextXAlignment.Right
-        lbl.TextYAlignment = Enum.TextYAlignment.Top
         lbl.LineHeight = 1
+        lbl.ZIndex = 6
         lbl.Parent = right_gutter_inner
     end
     right_gutter_inner.Size = UDim2.new(1, 0, 0, n * LINE_H + 8)
@@ -445,7 +427,8 @@ local function render_source_view(force)
         return
     end
     right_view_content.Text = highlight(src)
-    update_gutter(src)
+    local status = original_src and compute_line_diff(original_src, src) or nil
+    update_gutter(src, status)
 end
 
 local function update_header()
@@ -462,25 +445,16 @@ local function update_header()
         parts[#parts + 1] = "no script"
     end
     header_info.Text = table.concat(parts, "  ·  ")
-
     local dot_c = P.hint
     if st and st.script then
-        if is_dirty then dot_c = P.warn else dot_c = P.ok end
+        dot_c = is_dirty and P.warn or P.ok
     end
     status_dot.BackgroundColor3 = dot_c
-
-    if is_dirty then
-        btn_save.BackgroundColor3 = P.button_pri
-    else
-        btn_save.BackgroundColor3 = P.button
-    end
-
+    btn_save.BackgroundColor3 = is_dirty and P.button_pri or P.button
     if mode == "edit" then
-        btn_edit.Text = "DONE"
-        btn_edit.BackgroundColor3 = P.button_pri
+        btn_edit.Text = "DONE"; btn_edit.BackgroundColor3 = P.button_pri
     else
-        btn_edit.Text = "EDIT"
-        btn_edit.BackgroundColor3 = P.button
+        btn_edit.Text = "EDIT"; btn_edit.BackgroundColor3 = P.button
     end
 end
 
@@ -498,7 +472,8 @@ local function refresh_edit_display()
     if not right_edit_display or not right_edit_box then return end
     local src = right_edit_box.Text
     right_edit_display.Text = highlight(src)
-    update_gutter(src)
+    local status = original_src and compute_line_diff(original_src, src) or nil
+    update_gutter(src, status)
 end
 
 local function enter_edit_mode()
@@ -507,7 +482,8 @@ local function enter_edit_mode()
     local src = get_source(false) or ""
     right_edit_box.Text = src
     right_edit_display.Text = highlight(src)
-    update_gutter(src)
+    local status = original_src and compute_line_diff(original_src, src) or nil
+    update_gutter(src, status)
     loading_edit = false
     is_dirty = false
     render_source_view(false)
@@ -521,11 +497,9 @@ local function exit_edit_mode()
     local prev_src = cached_src or ""
     if st then
         if new_src ~= prev_src then
-            st.user_src = new_src
-            is_dirty = true
+            st.user_src = new_src; is_dirty = true
         else
-            st.user_src = nil
-            is_dirty = false
+            st.user_src = nil; is_dirty = false
         end
     end
     render_source_view(true)
@@ -538,24 +512,18 @@ local function revert_all()
     is_dirty = false
     cached_src = nil
     cached_for_bytecode = nil
+    original_src = nil
     if patch and patch.revert then patch.revert() end
     M.render_all()
 end
 
 local function do_save()
     local st = patch and patch.state
-    if not st or not st.script then
-        console.log("no script", P.err)
-        return
-    end
+    if not st or not st.script then console.log("no script", P.err); return end
     if not is_dirty and not st.dirty and not st.user_src then
-        console.log("nothing to save", P.dim)
-        return
+        console.log("nothing to save", P.dim); return
     end
-    if not patch or not patch.do_apply then
-        console.log("no apply method", P.err)
-        return
-    end
+    if not patch or not patch.do_apply then console.log("no apply", P.err); return end
     patch.do_apply()
     is_dirty = false
     cached_src = nil
@@ -570,8 +538,7 @@ end
 local function ensure_sg()
     gui_root = console.gui_root()
     if not gui_root and gethui then
-        local ok, r = pcall(gethui)
-        if ok and r then gui_root = r end
+        local ok, r = pcall(gethui); if ok and r then gui_root = r end
     end
     if not gui_root then gui_root = game:GetService("CoreGui") end
     if p_sg and p_sg.Parent == gui_root then return p_sg end
@@ -589,17 +556,15 @@ end
 function M.start()
     ensure_sg()
 
-    local PANEL_W = 900
-    local PANEL_H = 520
-    local HEADER_H = 30
-    local FOOTER_H = 44
+    local PANEL_W, PANEL_H = 900, 520
+    local HEADER_H, FOOTER_H = 30, 44
     local PAD = 6
     local BODY_Y = HEADER_H + PAD
     local BODY_H = PANEL_H - HEADER_H - FOOTER_H - PAD * 2
 
     bp = Instance.new("Frame")
     bp.Size = UDim2.new(0, PANEL_W, 0, PANEL_H)
-    bp.Position = UDim2.new(0.5, -PANEL_W / 2, 0.5, -PANEL_H / 2)
+    bp.Position = UDim2.new(0.5, -PANEL_W/2, 0.5, -PANEL_H/2)
     bp.BackgroundColor3 = P.bg
     bp.BorderColor3 = P.border
     bp.BorderSizePixel = 2
@@ -607,9 +572,7 @@ function M.start()
     bp.Visible = false
     bp.Parent = p_sg
 
-    --========================
     -- HEADER
-    --========================
     local header = Instance.new("Frame")
     header.Size = UDim2.new(1, -4, 0, HEADER_H)
     header.Position = UDim2.new(0, 2, 0, 2)
@@ -624,7 +587,6 @@ function M.start()
     title.TextColor3 = P.title
     title.Font = FONT
     title.TextSize = 16
-    title.TextScaled = false
     title.ZIndex = 2
     title.Parent = header
 
@@ -650,9 +612,7 @@ function M.start()
 
     drag_begin(header)
 
-    --========================
-    -- PANES
-    --========================
+    -- LEFT / RIGHT PANES
     local gap = 4
     local half_w = (PANEL_W - gap * 3 - 4) / 2
 
@@ -660,7 +620,6 @@ function M.start()
     left_pane.Size = UDim2.new(0, half_w, 0, BODY_H)
     left_pane.Position = UDim2.new(0, PAD, 0, BODY_Y)
     left_pane.BackgroundColor3 = P.editor
-    left_pane.BorderSizePixel = 0
     left_pane.ClipsDescendants = true
     left_pane.Parent = bp
 
@@ -669,12 +628,10 @@ function M.start()
     left_scroll.BackgroundTransparency = 1
     left_scroll.BorderSizePixel = 0
     left_scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-    left_scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
     setup_scroll(left_scroll)
     left_scroll.Parent = left_pane
 
     local left_layout = Instance.new("UIListLayout")
-    left_layout.Padding = UDim.new(0, 0)
     left_layout.SortOrder = Enum.SortOrder.LayoutOrder
     left_layout.Parent = left_scroll
 
@@ -683,15 +640,15 @@ function M.start()
     left_pad.PaddingTop = UDim.new(0, 4)
     left_pad.Parent = left_scroll
 
+    -- RIGHT PANE
     right_pane = Instance.new("Frame")
     right_pane.Size = UDim2.new(0, half_w, 0, BODY_H)
     right_pane.Position = UDim2.new(0, PAD * 2 + half_w, 0, BODY_Y)
     right_pane.BackgroundColor3 = P.editor
-    right_pane.BorderSizePixel = 0
     right_pane.ClipsDescendants = true
     right_pane.Parent = bp
 
-    local GUTTER_W = 34
+    local GUTTER_W = 40
     right_gutter = Instance.new("Frame")
     right_gutter.Size = UDim2.new(0, GUTTER_W, 1, 0)
     right_gutter.BackgroundColor3 = P.gutter
@@ -707,12 +664,11 @@ function M.start()
     right_gutter_inner.ZIndex = 6
     right_gutter_inner.Parent = right_gutter
 
-    -- VIEW
+    -- VIEW FRAME
     right_view_frame = Instance.new("Frame")
     right_view_frame.Size = UDim2.new(1, -GUTTER_W, 1, 0)
     right_view_frame.Position = UDim2.new(0, GUTTER_W, 0, 0)
     right_view_frame.BackgroundTransparency = 1
-    right_view_frame.BorderSizePixel = 0
     right_view_frame.Parent = right_pane
 
     right_view_scroll = Instance.new("ScrollingFrame")
@@ -720,8 +676,6 @@ function M.start()
     right_view_scroll.BackgroundTransparency = 1
     right_view_scroll.BorderSizePixel = 0
     right_view_scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-    right_view_scroll.AutomaticCanvasSize = Enum.AutomaticSize.XY
-    right_view_scroll.ScrollingDirection = Enum.ScrollingDirection.XY
     setup_scroll(right_view_scroll)
     right_view_scroll.Parent = right_view_frame
 
@@ -742,12 +696,11 @@ function M.start()
     right_view_content.ZIndex = 3
     right_view_content.Parent = right_view_scroll
 
-    -- EDIT
+    -- EDIT FRAME
     right_edit_frame = Instance.new("Frame")
     right_edit_frame.Size = UDim2.new(1, -GUTTER_W, 1, 0)
     right_edit_frame.Position = UDim2.new(0, GUTTER_W, 0, 0)
     right_edit_frame.BackgroundTransparency = 1
-    right_edit_frame.BorderSizePixel = 0
     right_edit_frame.Visible = false
     right_edit_frame.Parent = right_pane
 
@@ -756,8 +709,6 @@ function M.start()
     right_edit_scroll.BackgroundTransparency = 1
     right_edit_scroll.BorderSizePixel = 0
     right_edit_scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-    right_edit_scroll.AutomaticCanvasSize = Enum.AutomaticSize.XY
-    right_edit_scroll.ScrollingDirection = Enum.ScrollingDirection.XY
     setup_scroll(right_edit_scroll)
     right_edit_scroll.Parent = right_edit_frame
 
@@ -797,11 +748,20 @@ function M.start()
     right_edit_box.ZIndex = 4
     right_edit_box.Parent = right_edit_scroll
 
+    -- Sync gutter with scroll
     right_edit_scroll:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
         right_gutter_inner.Position = UDim2.new(0, 0, 0, -right_edit_scroll.CanvasPosition.Y + 4)
     end)
     right_view_scroll:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
         right_gutter_inner.Position = UDim2.new(0, 0, 0, -right_view_scroll.CanvasPosition.Y + 4)
+    end)
+
+    -- Update scroll canvas when content changes
+    right_edit_display:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+        right_edit_scroll.CanvasSize = UDim2.new(0, right_edit_display.AbsoluteSize.X + 20, 0, right_edit_display.AbsoluteSize.Y + 20)
+    end)
+    right_view_content:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+        right_view_scroll.CanvasSize = UDim2.new(0, right_view_content.AbsoluteSize.X + 20, 0, right_view_content.AbsoluteSize.Y + 20)
     end)
 
     right_edit_box:GetPropertyChangedSignal("Text"):Connect(function()
@@ -811,59 +771,35 @@ function M.start()
         update_header()
     end)
 
-    right_edit_box.Focused:Connect(function()
-        is_focused = true
-    end)
-    right_edit_box.FocusLost:Connect(function()
-        is_focused = false
-    end)
+    right_edit_box.Focused:Connect(function() is_focused = true end)
+    right_edit_box.FocusLost:Connect(function() is_focused = false end)
 
-    --========================
     -- FOOTER
-    --========================
     footer = Instance.new("Frame")
     footer.Size = UDim2.new(1, -4, 0, FOOTER_H - PAD - 2)
     footer.Position = UDim2.new(0, 2, 1, -FOOTER_H + 2)
     footer.BackgroundTransparency = 1
-    footer.BorderSizePixel = 0
     footer.Parent = bp
 
-    btn_decompile = mk_button(footer, "DECOMPILE", 110, 0, 4, false)
-    btn_edit = mk_button(footer, "EDIT", 80, 116, 4, false)
-    btn_revert = mk_button(footer, "REVERT", 90, 202, 4, false)
+    btn_decompile = mk_button(footer, "DECOMPILE", 110, 0, 4)
+    btn_edit = mk_button(footer, "EDIT", 80, 116, 4)
+    btn_revert = mk_button(footer, "REVERT", 90, 202, 4)
+    btn_save = mk_button(footer, "SAVE", 100, PANEL_W - PAD * 2 - 100 - 4, 4)
+    btn_exit = mk_button(footer, "EXIT", 80, PANEL_W - PAD * 2 - 100 - 80 - 10, 4)
 
-    local btn_w_save = 100
-    local btn_w_exit = 80
-    btn_save = mk_button(footer, "SAVE", btn_w_save,
-        PANEL_W - PAD * 2 - btn_w_save - 4, 4, false)
-    btn_exit = mk_button(footer, "EXIT", btn_w_exit,
-        PANEL_W - PAD * 2 - btn_w_save - btn_w_exit - 10, 4, false)
-
-    --========================
-    -- EVENTS
-    --========================
     btn_decompile.MouseButton1Click:Connect(function()
         if mode == "edit" then exit_edit_mode() end
-        cached_src = nil
-        cached_for_bytecode = nil
+        cached_src = nil; cached_for_bytecode = nil; original_src = nil
         M.render_all()
         console.log("re-decompiled via D1", P.ok)
     end)
 
     btn_edit.MouseButton1Click:Connect(function()
-        if mode == "view" then
-            enter_edit_mode()
-        else
-            exit_edit_mode()
-        end
+        if mode == "view" then enter_edit_mode() else exit_edit_mode() end
     end)
 
     btn_revert.MouseButton1Click:Connect(revert_all)
-
-    btn_exit.MouseButton1Click:Connect(function()
-        bp.Visible = false
-    end)
-
+    btn_exit.MouseButton1Click:Connect(function() bp.Visible = false end)
     btn_save.MouseButton1Click:Connect(do_save)
 end
 
