@@ -7,6 +7,8 @@ local MODULES = {
     "console",
     "parser",
     "disasm",
+    "names",
+    "varflow",
     "cfgs",
     "patch",
     "panel",
