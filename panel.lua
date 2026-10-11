@@ -7,13 +7,16 @@ local console, parser, disasm, cfgs, patch, names, varflow, ssa, expr
 local C
 local gui_root
 local p_sg
-local bp, bpTitle, bpBody, bpLeft, bpLeftScroll, bpRight, bpRightScroll
+local bp, bpHead, bpTitle
+local bpLeft, bpLeftScroll, bpRight, bpRightScroll
 local bpFoot, bpExit, bpApply
 
 local hex_lines = {}
 local dis_lines = {}
 local selected_byte = -1
 local dragOn, dragStart, dragPos, dragFrame
+local ssa_error_reported = false
+local expr_error_reported = false
 
 local u = game:GetService("UserInputService")
 local cam = workspace.CurrentCamera
@@ -188,166 +191,181 @@ local function render_hex()
     end
 end
 
-local function make_context(ssa_data, expr_db, proto, labels)
-    local function W(reg, pc)
-        local writes = ssa_data.write_at[pc] or {}
-        local v = writes[reg]
-        if v then return ssa_data.name_of[v] or ("t" .. v) end
-        return "R" .. reg
-    end
-
-    local function R(reg, pc)
-        local reads = ssa_data.read_at[pc] or {}
-        local v = reads[reg]
-        if not v then return "R" .. reg end
-        -- если для этой версии есть свёрнутое выражение — используем его
-        local e = expr_db and expr_db.get(v)
-        if e then return e.code end
-        return ssa_data.name_of[v] or ("t" .. v)
-    end
-
-    local function L(t, ins)
-        if labels and labels[t] then return labels[t] end
-        return string.format("%+d", t - ins.word_idx - ins.length)
-    end
-
-    return W, R, L
-end
-
 local function fmt_expr(ins, ssa_data, expr_db, proto, labels)
     if not ssa_data then
         return disasm.fmt(ins, proto, labels, {})
     end
 
     local pc = ins.word_idx
-    local W, R, L = make_context(ssa_data, expr_db, proto, labels)
+    local reads = ssa_data.read_at[pc] or {}
+    local writes = ssa_data.write_at[pc] or {}
+
+    local function W(reg)
+        local v = writes[reg]
+        if v then return ssa_data.name_of[v] or ("t" .. v) end
+        return "R" .. reg
+    end
+
+    local function R(reg)
+        local v = reads[reg]
+        if not v then return "R" .. reg end
+        local e = expr_db and expr_db.get(v)
+        if e then return e.code end
+        return ssa_data.name_of[v] or ("t" .. v)
+    end
+
     local function cstr(i) return disasm.const_str(proto, i) end
+    local function L(t)
+        if labels and labels[t] then return labels[t] end
+        return string.format("%+d", t - ins.word_idx - ins.length)
+    end
 
     local n = ins.name
     if n == "NOP" then return "" end
-    if n == "LOADNIL" then return W(ins.a, pc) .. " = nil" end
+    if n == "LOADNIL" then return W(ins.a) .. " = nil" end
     if n == "LOADB" then
         if ins.c ~= 0 then
-            return W(ins.a, pc) .. " = " .. (ins.b ~= 0 and "true" or "false") .. " ; goto " .. L(disasm.jump_target(ins), ins)
+            return W(ins.a) .. " = " .. (ins.b ~= 0 and "true" or "false") .. " ; goto " .. L(disasm.jump_target(ins))
         end
-        return W(ins.a, pc) .. " = " .. (ins.b ~= 0 and "true" or "false")
+        return W(ins.a) .. " = " .. (ins.b ~= 0 and "true" or "false")
     end
-    if n == "LOADN" then return W(ins.a, pc) .. " = " .. ins.d end
-    if n == "LOADK" then return W(ins.a, pc) .. " = " .. cstr(ins.d) end
-    if n == "LOADKX" then return W(ins.a, pc) .. " = " .. cstr(ins.aux or 0) end
-    if n == "MOVE" then return W(ins.a, pc) .. " = " .. R(ins.b, pc) end
-    if n == "GETUPVAL" then return W(ins.a, pc) .. " = upval" .. ins.b end
-    if n == "SETUPVAL" then return "upval" .. ins.b .. " = " .. R(ins.a, pc) end
-    if n == "GETGLOBAL" then return W(ins.a, pc) .. " = " .. cstr(ins.aux or 0) end
-    if n == "SETGLOBAL" then return cstr(ins.aux or 0) .. " = " .. R(ins.a, pc) end
-    if n == "GETIMPORT" then return W(ins.a, pc) .. " = " .. cstr(ins.d) end
-    if n == "GETTABLE" then return W(ins.a, pc) .. " = " .. R(ins.b, pc) .. "[" .. R(ins.c, pc) .. "]" end
-    if n == "SETTABLE" then return R(ins.b, pc) .. "[" .. R(ins.c, pc) .. "] = " .. R(ins.a, pc) end
+    if n == "LOADN" then return W(ins.a) .. " = " .. ins.d end
+    if n == "LOADK" then return W(ins.a) .. " = " .. cstr(ins.d) end
+    if n == "LOADKX" then return W(ins.a) .. " = " .. cstr(ins.aux or 0) end
+    if n == "MOVE" then return W(ins.a) .. " = " .. R(ins.b) end
+    if n == "GETUPVAL" then return W(ins.a) .. " = upval" .. ins.b end
+    if n == "SETUPVAL" then return "upval" .. ins.b .. " = " .. R(ins.a) end
+    if n == "GETGLOBAL" then return W(ins.a) .. " = " .. cstr(ins.aux or 0) end
+    if n == "SETGLOBAL" then return cstr(ins.aux or 0) .. " = " .. R(ins.a) end
+    if n == "GETIMPORT" then return W(ins.a) .. " = " .. cstr(ins.d) end
+    if n == "GETTABLE" then return W(ins.a) .. " = " .. R(ins.b) .. "[" .. R(ins.c) .. "]" end
+    if n == "SETTABLE" then return R(ins.b) .. "[" .. R(ins.c) .. "] = " .. R(ins.a) end
     if n == "GETTABLEKS" then
         local c = proto and proto.constants and proto.constants[(ins.aux or 0) + 1]
         local kn = c and c.value
         if type(kn) == "string" and kn:match("^[%a_][%w_]*$") then
-            return W(ins.a, pc) .. " = " .. R(ins.b, pc) .. "." .. kn
+            return W(ins.a) .. " = " .. R(ins.b) .. "." .. kn
         end
-        return W(ins.a, pc) .. " = " .. R(ins.b, pc) .. "[" .. cstr(ins.aux or 0) .. "]"
+        return W(ins.a) .. " = " .. R(ins.b) .. "[" .. cstr(ins.aux or 0) .. "]"
     end
     if n == "SETTABLEKS" then
         local c = proto and proto.constants and proto.constants[(ins.aux or 0) + 1]
         local kn = c and c.value
         if type(kn) == "string" and kn:match("^[%a_][%w_]*$") then
-            return R(ins.b, pc) .. "." .. kn .. " = " .. R(ins.a, pc)
+            return R(ins.b) .. "." .. kn .. " = " .. R(ins.a)
         end
-        return R(ins.b, pc) .. "[" .. cstr(ins.aux or 0) .. "] = " .. R(ins.a, pc)
+        return R(ins.b) .. "[" .. cstr(ins.aux or 0) .. "] = " .. R(ins.a)
     end
-    if n == "GETTABLEN" then return W(ins.a, pc) .. " = " .. R(ins.b, pc) .. "[" .. (ins.c + 1) .. "]" end
-    if n == "SETTABLEN" then return R(ins.b, pc) .. "[" .. (ins.c + 1) .. "] = " .. R(ins.a, pc) end
-    if n == "NEWTABLE" then return W(ins.a, pc) .. " = {}" end
-    if n == "DUPTABLE" then return W(ins.a, pc) .. " = {dup K" .. ins.d .. "}" end
-    if n == "SETLIST" then return R(ins.a, pc) .. "[..] = {..}" end
-    if n == "NEWCLOSURE" then return W(ins.a, pc) .. " = closure(P" .. ins.d .. ")" end
-    if n == "DUPCLOSURE" then return W(ins.a, pc) .. " = closure(K" .. ins.d .. ")" end
-    if n == "CAPTURE" then return "capture " .. ins.a .. " " .. R(ins.b, pc) end
+    if n == "GETTABLEN" then return W(ins.a) .. " = " .. R(ins.b) .. "[" .. (ins.c + 1) .. "]" end
+    if n == "SETTABLEN" then return R(ins.b) .. "[" .. (ins.c + 1) .. "] = " .. R(ins.a) end
+    if n == "NEWTABLE" then return W(ins.a) .. " = {}" end
+    if n == "DUPTABLE" then return W(ins.a) .. " = {dup K" .. ins.d .. "}" end
+    if n == "SETLIST" then return R(ins.a) .. "[..] = {..}" end
+    if n == "NEWCLOSURE" then return W(ins.a) .. " = closure(P" .. ins.d .. ")" end
+    if n == "DUPCLOSURE" then return W(ins.a) .. " = closure(K" .. ins.d .. ")" end
+    if n == "CAPTURE" then return "capture " .. ins.a .. " " .. R(ins.b) end
     if n == "NAMECALL" then
         local c = proto and proto.constants and proto.constants[(ins.aux or 0) + 1]
         local kn = c and c.value or "?"
-        return W(ins.a, pc) .. " = " .. R(ins.b, pc) .. ":" .. tostring(kn) .. "(...)"
+        return W(ins.a) .. " = " .. R(ins.b) .. ":" .. tostring(kn) .. "(...)"
     end
-    if n == "CALL" then
+    if n == "CALL" or n == "CALLFB" then
         local nargs = ins.b - 1
         local nres = ins.c - 1
         local args = {}
-        for i = 1, nargs do args[#args + 1] = R(ins.a + i, pc) end
-        local res = nres == 1 and (W(ins.a, pc) .. " = ") or ""
-        return res .. "call(" .. R(ins.a, pc) .. (#args > 0 and (", " .. table.concat(args, ", ")) or "") .. ")"
+        for i = 1, nargs do args[#args + 1] = R(ins.a + i) end
+        local res
+        if nres == 1 then
+            res = W(ins.a) .. " = "
+        elseif nres == 0 then
+            res = ""
+        else
+            local parts = {}
+            for i = 0, nres - 1 do parts[#parts + 1] = W(ins.a + i) end
+            res = table.concat(parts, ", ") .. " = "
+        end
+        return res .. "call(" .. R(ins.a) .. (#args > 0 and (", " .. table.concat(args, ", ")) or "") .. ")"
     end
     if n == "RETURN" then
         local nres = ins.b - 1
         if nres <= 0 then return "return" end
         local vals = {}
-        for i = 0, nres - 1 do vals[#vals + 1] = R(ins.a + i, pc) end
+        for i = 0, nres - 1 do vals[#vals + 1] = R(ins.a + i) end
         return "return " .. table.concat(vals, ", ")
     end
-    if n == "JUMP" then return "goto " .. L(disasm.jump_target(ins), ins) end
-    if n == "JUMPBACK" then return "back " .. L(disasm.jump_target(ins), ins) end
-    if n == "JUMPX" then return "gotoX " .. L(disasm.jump_target(ins), ins) end
-    if n == "JUMPIF" then return "if " .. R(ins.a, pc) .. " then goto " .. L(disasm.jump_target(ins), ins) end
-    if n == "JUMPIFNOT" then return "if not " .. R(ins.a, pc) .. " then goto " .. L(disasm.jump_target(ins), ins) end
-    if n == "JUMPIFEQ" then return "if " .. R(ins.a, pc) .. " == " .. R(ins.aux or 0, pc) .. " then goto " .. L(disasm.jump_target(ins), ins) end
-    if n == "JUMPIFNOTEQ" then return "if " .. R(ins.a, pc) .. " ~= " .. R(ins.aux or 0, pc) .. " then goto " .. L(disasm.jump_target(ins), ins) end
-    if n == "JUMPIFLE" then return "if " .. R(ins.a, pc) .. " <= " .. R(ins.aux or 0, pc) .. " then goto " .. L(disasm.jump_target(ins), ins) end
-    if n == "JUMPIFLT" then return "if " .. R(ins.a, pc) .. " < " .. R(ins.aux or 0, pc) .. " then goto " .. L(disasm.jump_target(ins), ins) end
-    if n == "JUMPIFNOTLE" then return "if " .. R(ins.a, pc) .. " > " .. R(ins.aux or 0, pc) .. " then goto " .. L(disasm.jump_target(ins), ins) end
-    if n == "JUMPIFNOTLT" then return "if " .. R(ins.a, pc) .. " >= " .. R(ins.aux or 0, pc) .. " then goto " .. L(disasm.jump_target(ins), ins) end
+    if n == "JUMP" then return "goto " .. L(disasm.jump_target(ins)) end
+    if n == "JUMPBACK" then return "back " .. L(disasm.jump_target(ins)) end
+    if n == "JUMPX" then return "gotoX " .. L(disasm.jump_target(ins)) end
+    if n == "JUMPIF" then return "if " .. R(ins.a) .. " then goto " .. L(disasm.jump_target(ins)) end
+    if n == "JUMPIFNOT" then return "if not " .. R(ins.a) .. " then goto " .. L(disasm.jump_target(ins)) end
+    if n == "JUMPIFEQ" then return "if " .. R(ins.a) .. " == " .. R(ins.aux or 0) .. " then goto " .. L(disasm.jump_target(ins)) end
+    if n == "JUMPIFNOTEQ" then return "if " .. R(ins.a) .. " ~= " .. R(ins.aux or 0) .. " then goto " .. L(disasm.jump_target(ins)) end
+    if n == "JUMPIFLE" then return "if " .. R(ins.a) .. " <= " .. R(ins.aux or 0) .. " then goto " .. L(disasm.jump_target(ins)) end
+    if n == "JUMPIFLT" then return "if " .. R(ins.a) .. " < " .. R(ins.aux or 0) .. " then goto " .. L(disasm.jump_target(ins)) end
+    if n == "JUMPIFNOTLE" then return "if " .. R(ins.a) .. " > " .. R(ins.aux or 0) .. " then goto " .. L(disasm.jump_target(ins)) end
+    if n == "JUMPIFNOTLT" then return "if " .. R(ins.a) .. " >= " .. R(ins.aux or 0) .. " then goto " .. L(disasm.jump_target(ins)) end
     if n == "JUMPXEQKNIL" then
         local nf = (ins.aux or 0) >= 0x80000000
-        return "if " .. R(ins.a, pc) .. " " .. (nf and "~=" or "==") .. " nil then goto " .. L(disasm.jump_target(ins), ins)
+        return "if " .. R(ins.a) .. " " .. (nf and "~=" or "==") .. " nil then goto " .. L(disasm.jump_target(ins))
     end
     if n == "JUMPXEQKB" then
         local v = (ins.aux or 0) % 2
-        return "if " .. R(ins.a, pc) .. " == " .. (v == 1 and "true" or "false") .. " then goto " .. L(disasm.jump_target(ins), ins)
+        return "if " .. R(ins.a) .. " == " .. (v == 1 and "true" or "false") .. " then goto " .. L(disasm.jump_target(ins))
     end
     if n == "JUMPXEQKN" or n == "JUMPXEQKS" then
         local k = (ins.aux or 0) % 0x1000000
-        return "if " .. R(ins.a, pc) .. " == " .. cstr(k) .. " then goto " .. L(disasm.jump_target(ins), ins)
+        return "if " .. R(ins.a) .. " == " .. cstr(k) .. " then goto " .. L(disasm.jump_target(ins))
     end
-    if n == "ADD" then return W(ins.a, pc) .. " = " .. R(ins.b, pc) .. " + " .. R(ins.c, pc) end
-    if n == "SUB" then return W(ins.a, pc) .. " = " .. R(ins.b, pc) .. " - " .. R(ins.c, pc) end
-    if n == "MUL" then return W(ins.a, pc) .. " = " .. R(ins.b, pc) .. " * " .. R(ins.c, pc) end
-    if n == "DIV" then return W(ins.a, pc) .. " = " .. R(ins.b, pc) .. " / " .. R(ins.c, pc) end
-    if n == "IDIV" then return W(ins.a, pc) .. " = " .. R(ins.b, pc) .. " // " .. R(ins.c, pc) end
-    if n == "MOD" then return W(ins.a, pc) .. " = " .. R(ins.b, pc) .. " % " .. R(ins.c, pc) end
-    if n == "POW" then return W(ins.a, pc) .. " = " .. R(ins.b, pc) .. " ^ " .. R(ins.c, pc) end
-    if n == "ADDK" then return W(ins.a, pc) .. " = " .. R(ins.b, pc) .. " + " .. cstr(ins.c) end
-    if n == "SUBK" then return W(ins.a, pc) .. " = " .. R(ins.b, pc) .. " - " .. cstr(ins.c) end
-    if n == "MULK" then return W(ins.a, pc) .. " = " .. R(ins.b, pc) .. " * " .. cstr(ins.c) end
-    if n == "DIVK" then return W(ins.a, pc) .. " = " .. R(ins.b, pc) .. " / " .. cstr(ins.c) end
-    if n == "MODK" then return W(ins.a, pc) .. " = " .. R(ins.b, pc) .. " % " .. cstr(ins.c) end
-    if n == "POWK" then return W(ins.a, pc) .. " = " .. R(ins.b, pc) .. " ^ " .. cstr(ins.c) end
-    if n == "SUBRK" then return W(ins.a, pc) .. " = " .. cstr(ins.b) .. " - " .. R(ins.c, pc) end
-    if n == "DIVRK" then return W(ins.a, pc) .. " = " .. cstr(ins.b) .. " / " .. R(ins.c, pc) end
-    if n == "AND" then return W(ins.a, pc) .. " = " .. R(ins.b, pc) .. " and " .. R(ins.c, pc) end
-    if n == "OR" then return W(ins.a, pc) .. " = " .. R(ins.b, pc) .. " or " .. R(ins.c, pc) end
-    if n == "ANDK" then return W(ins.a, pc) .. " = " .. R(ins.b, pc) .. " and " .. cstr(ins.c) end
-    if n == "ORK" then return W(ins.a, pc) .. " = " .. R(ins.b, pc) .. " or " .. cstr(ins.c) end
+    if n == "ADD" then return W(ins.a) .. " = " .. R(ins.b) .. " + " .. R(ins.c) end
+    if n == "SUB" then return W(ins.a) .. " = " .. R(ins.b) .. " - " .. R(ins.c) end
+    if n == "MUL" then return W(ins.a) .. " = " .. R(ins.b) .. " * " .. R(ins.c) end
+    if n == "DIV" then return W(ins.a) .. " = " .. R(ins.b) .. " / " .. R(ins.c) end
+    if n == "IDIV" then return W(ins.a) .. " = " .. R(ins.b) .. " // " .. R(ins.c) end
+    if n == "MOD" then return W(ins.a) .. " = " .. R(ins.b) .. " % " .. R(ins.c) end
+    if n == "POW" then return W(ins.a) .. " = " .. R(ins.b) .. " ^ " .. R(ins.c) end
+    if n == "ADDK" then return W(ins.a) .. " = " .. R(ins.b) .. " + " .. cstr(ins.c) end
+    if n == "SUBK" then return W(ins.a) .. " = " .. R(ins.b) .. " - " .. cstr(ins.c) end
+    if n == "MULK" then return W(ins.a) .. " = " .. R(ins.b) .. " * " .. cstr(ins.c) end
+    if n == "DIVK" then return W(ins.a) .. " = " .. R(ins.b) .. " / " .. cstr(ins.c) end
+    if n == "MODK" then return W(ins.a) .. " = " .. R(ins.b) .. " % " .. cstr(ins.c) end
+    if n == "POWK" then return W(ins.a) .. " = " .. R(ins.b) .. " ^ " .. cstr(ins.c) end
+    if n == "SUBRK" then return W(ins.a) .. " = " .. cstr(ins.b) .. " - " .. R(ins.c) end
+    if n == "DIVRK" then return W(ins.a) .. " = " .. cstr(ins.b) .. " / " .. R(ins.c) end
+    if n == "AND" then return W(ins.a) .. " = " .. R(ins.b) .. " and " .. R(ins.c) end
+    if n == "OR" then return W(ins.a) .. " = " .. R(ins.b) .. " or " .. R(ins.c) end
+    if n == "ANDK" then return W(ins.a) .. " = " .. R(ins.b) .. " and " .. cstr(ins.c) end
+    if n == "ORK" then return W(ins.a) .. " = " .. R(ins.b) .. " or " .. cstr(ins.c) end
     if n == "CONCAT" then
         local parts = {}
-        for i = ins.b, ins.c do parts[#parts + 1] = R(i, pc) end
-        return W(ins.a, pc) .. " = " .. table.concat(parts, " .. ")
+        for i = ins.b, ins.c do parts[#parts + 1] = R(i) end
+        return W(ins.a) .. " = " .. table.concat(parts, " .. ")
     end
-    if n == "NOT" then return W(ins.a, pc) .. " = not " .. R(ins.b, pc) end
-    if n == "MINUS" then return W(ins.a, pc) .. " = -" .. R(ins.b, pc) end
-    if n == "LENGTH" then return W(ins.a, pc) .. " = #" .. R(ins.b, pc) end
-    if n == "FORNPREP" then return "for prep -> " .. L(disasm.jump_target(ins), ins) end
-    if n == "FORNLOOP" then return "for loop -> " .. L(disasm.jump_target(ins), ins) end
-    if n == "FORGPREP" then return "forgen prep -> " .. L(disasm.jump_target(ins), ins) end
+    if n == "NOT" then return W(ins.a) .. " = not " .. R(ins.b) end
+    if n == "MINUS" then return W(ins.a) .. " = -" .. R(ins.b) end
+    if n == "LENGTH" then return W(ins.a) .. " = #" .. R(ins.b) end
+    if n == "FORNPREP" then return "for prep -> " .. L(disasm.jump_target(ins)) end
+    if n == "FORNLOOP" then return "for loop -> " .. L(disasm.jump_target(ins)) end
+    if n == "FORGPREP" then return "forgen prep -> " .. L(disasm.jump_target(ins)) end
     if n == "FORGLOOP" then
         local cnt = (ins.aux or 0) % 256
-        return "forgen loop -> " .. L(disasm.jump_target(ins), ins) .. " vars=" .. cnt
+        return "forgen loop -> " .. L(disasm.jump_target(ins)) .. " vars=" .. cnt
     end
-    if n == "GETVARARGS" then return W(ins.a, pc) .. " = ..." end
+    if n == "GETVARARGS" then return W(ins.a) .. " = ..." end
     if n == "PREPVARARGS" then return "prep varargs " .. ins.a end
 
     return string.format("%s A=%d B=%d C=%d D=%d", n, ins.a, ins.b, ins.c, ins.d)
+end
+
+local function is_inlined_call(ins, ssa_data, expr_db)
+    if not ssa_data or not expr_db then return false end
+    if ins.name ~= "CALL" and ins.name ~= "CALLFB" then return false end
+    local nres = ins.c - 1
+    if nres ~= 1 then return false end
+    local writes = ssa_data.write_at[ins.word_idx]
+    if not writes then return false end
+    local v = writes[ins.a]
+    if not v then return false end
+    return expr_db.inlineable and expr_db.inlineable[v]
 end
 
 local function make_edit_row(ins, current_value, proto, labels, indent, on_change, ssa_data, expr_db)
@@ -410,7 +428,7 @@ local function make_edit_row(ins, current_value, proto, labels, indent, on_chang
     table.insert(dis_lines, {f = row, byte_offset = ins.byte_offset, ins = ins})
 end
 
-local function make_read_row(ins, proto, labels, indent, ssa_data, expr_db)
+local function make_read_row(ins, proto, labels, indent, ssa_data, expr_db, dim)
     local row = Instance.new("Frame")
     row.Size = UDim2.new(1, 0, 0, 18)
     row.BackgroundTransparency = 1
@@ -422,7 +440,9 @@ local function make_read_row(ins, proto, labels, indent, ssa_data, expr_db)
     lbl.Text = string.rep("  ", indent) .. string.format("%06X  %s",
         ins.byte_offset, fmt_expr(ins, ssa_data, expr_db, proto, labels))
     local col = C.txt
-    if ins.name == "LOADN" or ins.name == "LOADK" then
+    if dim then
+        col = C.dim
+    elseif ins.name == "LOADN" or ins.name == "LOADK" then
         col = C.warn
     elseif ins.name == "LOADB" then
         col = C.accent
@@ -490,17 +510,27 @@ local function safe_cfgs(instrs)
 end
 
 local function safe_ssa(instrs, proto)
-    if ssa and ssa.build then
-        local ok, r = pcall(ssa.build, instrs, proto)
-        if ok and type(r) == "table" then return r end
+    if not ssa or not ssa.build then return nil end
+    local ok, r = pcall(ssa.build, instrs, proto)
+    if ok and type(r) == "table" then return r end
+    if not ssa_error_reported then
+        ssa_error_reported = true
+        if console and console.log then
+            console.log("[ssa] build failed: " .. tostring(r), C.err)
+        end
     end
     return nil
 end
 
 local function safe_expr(ssa_data, proto, instrs)
-    if expr and expr.build and ssa_data then
-        local ok, r = pcall(expr.build, ssa_data, proto, instrs)
-        if ok and type(r) == "table" then return r end
+    if not expr or not expr.build or not ssa_data then return nil end
+    local ok, r = pcall(expr.build, ssa_data, proto, instrs)
+    if ok and type(r) == "table" then return r end
+    if not expr_error_reported then
+        expr_error_reported = true
+        if console and console.log then
+            console.log("[expr] build failed: " .. tostring(r), C.err)
+        end
     end
     return nil
 end
@@ -560,6 +590,22 @@ local function render_dis()
             else
                 make_read_row(ins, proto, labels, indent, ssa_data, expr_db)
             end
+        elseif is_inlined_call(ins, ssa_data, expr_db) then
+            -- результат вызова ушёл в место использования; показываем как затенённую
+            -- строку, чтобы понимать, где реально был CALL
+            local row = Instance.new("Frame")
+            row.Size = UDim2.new(1, 0, 0, 16)
+            row.BackgroundTransparency = 1
+            row.Parent = bpRightScroll
+            local lbl = Instance.new("TextLabel")
+            lbl.Size = UDim2.new(1, 0, 1, 0)
+            lbl.BackgroundTransparency = 1
+            lbl.Text = string.rep("  ", indent) .. string.format("%06X  -- call inlined", ins.byte_offset)
+            lbl.TextColor3 = C.dim
+            lbl.Font = Enum.Font.Code
+            lbl.TextSize = 11
+            lbl.TextXAlignment = Enum.TextXAlignment.Left
+            lbl.Parent = row
         else
             make_read_row(ins, proto, labels, indent, ssa_data, expr_db)
         end
@@ -590,9 +636,10 @@ local function update_save_state()
     end
     if st.script and st.working then
         local sch = st.parsed and st.parsed.scheme or "?"
+        local ssa_status = ssa_error_reported and "ssa:ERR" or "ssa:OK"
         bpTitle.Text = string.format(
-            "BYTECODE  %s   proto=%d   size=%d   op=%s   %s",
-            st.script.Name, st.proto_idx, #st.working, sch,
+            "BYTECODE   %s   proto=%d   size=%d   op=%s   %s   %s",
+            st.script.Name, st.proto_idx, #st.working, sch, ssa_status,
             st.dirty and "[modified]" or "[clean]"
         )
     else
@@ -610,27 +657,32 @@ function M.start()
     ensure_sg()
 
     bp = Instance.new("Frame")
-    bp.Size = UDim2.new(0, 780, 0, 440)
-    bp.Position = UDim2.new(0.5, -390, 0.5, -220)
+    bp.Size = UDim2.new(0, 820, 0, 460)
+    bp.Position = UDim2.new(0.5, -410, 0.5, -230)
     bp.BackgroundColor3 = C.bg
     bp.BorderSizePixel = 1
     bp.BorderColor3 = C.border
     bp.Visible = false
     bp.Parent = p_sg
 
-    drag(bp)
-
-    local bpHead = Instance.new("Frame")
-    bpHead.Size = UDim2.new(1, 0, 0, 26)
+    -- заголовок: без отдельной рамки, сливается с панелью
+    bpHead = Instance.new("Frame")
+    bpHead.Size = UDim2.new(1, -2, 0, 26)
+    bpHead.Position = UDim2.new(0, 1, 0, 1)
     bpHead.BackgroundColor3 = C.bar
-    bpHead.BorderSizePixel = 1
-    bpHead.BorderColor3 = C.border
+    bpHead.BorderSizePixel = 0
     bpHead.Parent = bp
-    drag(bpHead)
+
+    local headSep = Instance.new("Frame")
+    headSep.Size = UDim2.new(1, 0, 0, 1)
+    headSep.Position = UDim2.new(0, 0, 1, 0)
+    headSep.BackgroundColor3 = C.border
+    headSep.BorderSizePixel = 0
+    headSep.Parent = bpHead
 
     bpTitle = Instance.new("TextLabel")
     bpTitle.Size = UDim2.new(1, -12, 1, 0)
-    bpTitle.Position = UDim2.new(0, 6, 0, 0)
+    bpTitle.Position = UDim2.new(0, 8, 0, 0)
     bpTitle.BackgroundTransparency = 1
     bpTitle.Text = "BYTECODE"
     bpTitle.TextColor3 = C.accent
@@ -639,36 +691,42 @@ function M.start()
     bpTitle.TextXAlignment = Enum.TextXAlignment.Left
     bpTitle.Parent = bpHead
 
-    bpBody = Instance.new("Frame")
-    bpBody.Size = UDim2.new(1, 0, 1, -26 - 32)
-    bpBody.Position = UDim2.new(0, 0, 0, 26)
-    bpBody.BackgroundTransparency = 1
-    bpBody.Parent = bp
+    drag(bpHead)
+
+    local bodyY = 28
+    local footH = 34
+    local bodyH = bp.AbsoluteSize.Y - bodyY - footH
 
     bpLeft = Instance.new("Frame")
-    bpLeft.Size = UDim2.new(0.5, -8, 1, -8)
-    bpLeft.Position = UDim2.new(0, 4, 0, 4)
+    bpLeft.Size = UDim2.new(0.5, -8, 1, -bodyY - footH - 4)
+    bpLeft.Position = UDim2.new(0, 4, 0, bodyY)
     bpLeft.BackgroundColor3 = C.input
     bpLeft.BorderSizePixel = 1
     bpLeft.BorderColor3 = C.border
     bpLeft.ClipsDescendants = true
-    bpLeft.Parent = bpBody
+    bpLeft.Parent = bp
 
     local bpLeftLbl = Instance.new("TextLabel")
-    bpLeftLbl.Size = UDim2.new(1, 0, 0, 18)
+    bpLeftLbl.Size = UDim2.new(1, 0, 0, 20)
     bpLeftLbl.BackgroundColor3 = C.bar
-    bpLeftLbl.BorderSizePixel = 1
-    bpLeftLbl.BorderColor3 = C.border
-    bpLeftLbl.Text = " HEX"
+    bpLeftLbl.BorderSizePixel = 0
+    bpLeftLbl.Text = "  HEX"
     bpLeftLbl.TextColor3 = C.dim
     bpLeftLbl.Font = Enum.Font.Code
     bpLeftLbl.TextSize = 11
     bpLeftLbl.TextXAlignment = Enum.TextXAlignment.Left
     bpLeftLbl.Parent = bpLeft
 
+    local leftSep = Instance.new("Frame")
+    leftSep.Size = UDim2.new(1, 0, 0, 1)
+    leftSep.Position = UDim2.new(0, 0, 1, 0)
+    leftSep.BackgroundColor3 = C.border
+    leftSep.BorderSizePixel = 0
+    leftSep.Parent = bpLeftLbl
+
     bpLeftScroll = Instance.new("ScrollingFrame")
-    bpLeftScroll.Size = UDim2.new(1, 0, 1, -18)
-    bpLeftScroll.Position = UDim2.new(0, 0, 0, 18)
+    bpLeftScroll.Size = UDim2.new(1, 0, 1, -20)
+    bpLeftScroll.Position = UDim2.new(0, 0, 0, 20)
     bpLeftScroll.BackgroundTransparency = 1
     bpLeftScroll.BorderSizePixel = 0
     bpLeftScroll.ScrollBarThickness = 3
@@ -688,29 +746,35 @@ function M.start()
     bpLPad.Parent = bpLeftScroll
 
     bpRight = Instance.new("Frame")
-    bpRight.Size = UDim2.new(0.5, -8, 1, -8)
-    bpRight.Position = UDim2.new(0.5, 4, 0, 4)
+    bpRight.Size = UDim2.new(0.5, -8, 1, -bodyY - footH - 4)
+    bpRight.Position = UDim2.new(0.5, 4, 0, bodyY)
     bpRight.BackgroundColor3 = C.input
     bpRight.BorderSizePixel = 1
     bpRight.BorderColor3 = C.border
     bpRight.ClipsDescendants = true
-    bpRight.Parent = bpBody
+    bpRight.Parent = bp
 
     local bpRightLbl = Instance.new("TextLabel")
-    bpRightLbl.Size = UDim2.new(1, 0, 0, 18)
+    bpRightLbl.Size = UDim2.new(1, 0, 0, 20)
     bpRightLbl.BackgroundColor3 = C.bar
-    bpRightLbl.BorderSizePixel = 1
-    bpRightLbl.BorderColor3 = C.border
-    bpRightLbl.Text = " DISASM"
+    bpRightLbl.BorderSizePixel = 0
+    bpRightLbl.Text = "  DISASM"
     bpRightLbl.TextColor3 = C.dim
     bpRightLbl.Font = Enum.Font.Code
     bpRightLbl.TextSize = 11
     bpRightLbl.TextXAlignment = Enum.TextXAlignment.Left
     bpRightLbl.Parent = bpRight
 
+    local rightSep = Instance.new("Frame")
+    rightSep.Size = UDim2.new(1, 0, 0, 1)
+    rightSep.Position = UDim2.new(0, 0, 1, 0)
+    rightSep.BackgroundColor3 = C.border
+    rightSep.BorderSizePixel = 0
+    rightSep.Parent = bpRightLbl
+
     bpRightScroll = Instance.new("ScrollingFrame")
-    bpRightScroll.Size = UDim2.new(1, 0, 1, -18)
-    bpRightScroll.Position = UDim2.new(0, 0, 0, 18)
+    bpRightScroll.Size = UDim2.new(1, 0, 1, -20)
+    bpRightScroll.Position = UDim2.new(0, 0, 0, 20)
     bpRightScroll.BackgroundTransparency = 1
     bpRightScroll.BorderSizePixel = 0
     bpRightScroll.ScrollBarThickness = 3
@@ -730,15 +794,15 @@ function M.start()
     bpRPad.Parent = bpRightScroll
 
     bpFoot = Instance.new("Frame")
-    bpFoot.Size = UDim2.new(1, 0, 0, 32)
-    bpFoot.Position = UDim2.new(0, 0, 1, -32)
+    bpFoot.Size = UDim2.new(1, 0, 0, footH)
+    bpFoot.Position = UDim2.new(0, 0, 1, -footH)
     bpFoot.BackgroundColor3 = C.bar
     bpFoot.BorderSizePixel = 1
     bpFoot.BorderColor3 = C.border
     bpFoot.Parent = bp
 
     bpExit = Instance.new("TextButton")
-    bpExit.Size = UDim2.new(0, 90, 0, 24)
+    bpExit.Size = UDim2.new(0, 90, 0, 26)
     bpExit.Position = UDim2.new(0, 6, 0, 4)
     bpExit.BackgroundColor3 = C.input
     bpExit.BorderSizePixel = 1
@@ -750,7 +814,7 @@ function M.start()
     bpExit.Parent = bpFoot
 
     bpApply = Instance.new("TextButton")
-    bpApply.Size = UDim2.new(0, 90, 0, 24)
+    bpApply.Size = UDim2.new(0, 90, 0, 26)
     bpApply.Position = UDim2.new(1, -96, 0, 4)
     bpApply.BackgroundColor3 = C.input
     bpApply.BorderSizePixel = 1
@@ -768,6 +832,8 @@ function M.start()
     bpApply.MouseButton1Click:Connect(function()
         if patch and patch.do_apply then patch.do_apply() end
     end)
+
+    drag(bp)
 end
 
 function M.show()
@@ -783,7 +849,7 @@ function M.show()
     if bp.Parent ~= p_sg then bp.Parent = p_sg end
 
     bp.Visible = true
-    bp.Position = UDim2.new(0.5, -390, 0.5, -220)
+    bp.Position = UDim2.new(0.5, -410, 0.5, -230)
 
     local ok, err = pcall(M.render_all)
     if not ok and console and console.log then
