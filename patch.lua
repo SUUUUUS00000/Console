@@ -22,6 +22,8 @@ M.state = {
 
 local active_hooks = {}
 local last_applied = nil
+local script_cache = nil
+local script_cache_time = 0
 
 local function u32_bytes(v)
     return string.char(
@@ -126,27 +128,56 @@ function M.apply_edit_loadk(ins, v)
     after_edit("patched LOADK pc=" .. ins.word_idx .. " K" .. ins.d .. " -> " .. tostring(v))
 end
 
-local function find_script(name)
-    for _, s in ipairs(getrunningscripts and getrunningscripts() or {}) do
-        if s.Name == name then return s end
-    end
-    for _, s in ipairs(getloadedmodules and getloadedmodules() or {}) do
-        if s.Name == name then return s end
-    end
+--========= ПОИСК СКРИПТОВ =========
+
+local function collect_all_scripts()
+    local list = {}
     for _, s in ipairs(game:GetDescendants()) do
-        if (s:IsA("LocalScript") or s:IsA("ModuleScript")) and s.Name == name then
-            return s
+        if s:IsA("LocalScript") or s:IsA("ModuleScript") or s:IsA("Script") then
+            list[#list + 1] = s
         end
     end
-    return nil
+    return list
 end
 
-function M.load_script(name)
+function M.get_all_scripts(force)
+    local now = tick()
+    if force or not script_cache or (now - script_cache_time) > 3 then
+        script_cache = collect_all_scripts()
+        script_cache_time = now
+    end
+    return script_cache
+end
+
+function M.search_scripts(query, limit)
+    limit = limit or 50
+    query = (query or ""):lower()
+    local results = {}
+    local all = M.get_all_scripts()
+    for _, s in ipairs(all) do
+        local path = s:GetFullName()
+        if query == "" or path:lower():find(query, 1, true) then
+            results[#results + 1] = s
+            if #results >= limit then break end
+        end
+    end
+    return results
+end
+
+--========= ЗАГРУЗКА =========
+
+function M._load_instance(s)
     local C = console.colors()
-    local s = find_script(name)
-    if not s then console.log("not found: " .. name, C.err); return end
+    if not s then console.log("nil instance", C.err); return end
+    if not (s:IsA("LocalScript") or s:IsA("ModuleScript") or s:IsA("Script")) then
+        console.log("not a script: " .. s:GetFullName() .. " (" .. s.ClassName .. ")", C.err)
+        return
+    end
     local bc = getscriptbytecode(s)
-    if not bc or #bc == 0 then console.log("empty bytecode", C.err); return end
+    if not bc or #bc == 0 then
+        console.log("empty bytecode: " .. s:GetFullName(), C.err)
+        return
+    end
     local parsed, err = parser.parse(bc)
     if not parsed then
         console.log("parse: " .. tostring(err) .. " (size=" .. #bc .. ")", C.err)
@@ -168,8 +199,70 @@ function M.load_script(name)
         BC.modules.panel.render_all()
     end
     console.log("loaded " .. s:GetFullName() .. " (v" .. parsed.version
-        .. ", scheme=" .. (parsed.scheme or "identity")
-        .. ", " .. #bc .. "b)", C.ok)
+        .. ", scheme=" .. (parsed.scheme or "identity") .. ", " .. #bc .. "b)", C.ok)
+end
+
+function M.load_script(name)
+    local C = console.colors()
+    local s = nil
+    for _, c in ipairs(getrunningscripts and getrunningscripts() or {}) do
+        if c.Name == name then s = c; break end
+    end
+    if not s then
+        for _, c in ipairs(getloadedmodules and getloadedmodules() or {}) do
+            if c.Name == name then s = c; break end
+        end
+    end
+    if not s then
+        for _, c in ipairs(M.get_all_scripts()) do
+            if c.Name == name then s = c; break end
+        end
+    end
+    if not s then console.log("not found: " .. name, C.err); return end
+    M._load_instance(s)
+end
+
+function M.load_path(path)
+    local C = console.colors()
+    if not path or path == "" then console.log("empty path", C.err); return end
+    local parts = {}
+    for part in path:gmatch("[^%.]+") do
+        parts[#parts + 1] = part
+    end
+    if #parts == 0 then console.log("empty path", C.err); return end
+    local idx = 1
+    local current = game
+    if parts[1] == "game" then idx = 2 end
+    for i = idx, #parts do
+        local next_obj = current:FindFirstChild(parts[i])
+        if not next_obj then
+            console.log("not found: " .. parts[i] .. " at " .. current:GetFullName(), C.err)
+            return
+        end
+        current = next_obj
+    end
+    M._load_instance(current)
+end
+
+function M.load_script_in(container_name, script_name)
+    local C = console.colors()
+    local container = nil
+    for _, obj in ipairs(game:GetDescendants()) do
+        if obj.Name == container_name then
+            container = obj
+            break
+        end
+    end
+    if not container then
+        console.log("container not found: " .. container_name, C.err)
+        return
+    end
+    local s = container:FindFirstChild(script_name, true)
+    if not s then
+        console.log("not found: " .. script_name .. " inside " .. container_name, C.err)
+        return
+    end
+    M._load_instance(s)
 end
 
 function M.list_scripts()
@@ -203,6 +296,8 @@ function M.list_held()
     end
 end
 
+--========= ДЕКОМПИЛЯЦИЯ =========
+
 function M.decompile_full()
     local st = M.state
     if st.user_src then
@@ -223,7 +318,6 @@ function M.decompile_full()
     return src, nil, kind
 end
 
--- Применение
 function M.apply_edit(script, new_bytes)
     local C = console.colors()
     local cl = getscriptclosure(script)
@@ -340,9 +434,7 @@ function M.revert()
     console.log("reverted", C.warn)
 end
 
---=====================================================================
--- КОМАНДЫ ПОИСКА И ЗАМЕНЫ ПО ЗНАЧЕНИЮ
---=====================================================================
+--========= findnum / setnum / edit / proto =========
 
 function M.findnum_cmd(a)
     local C = console.colors()
@@ -352,7 +444,6 @@ function M.findnum_cmd(a)
     if not target then console.log("usage: findnum <value>", C.err); return end
     local proto = st.parsed.protos[st.proto_idx]
     console.log("searching for " .. target .. " in proto " .. st.proto_idx, C.accent)
-
     local found = 0
     for _, ins in ipairs(st.instrs) do
         if ins.name == "LOADN" and ins.d == target then
@@ -385,7 +476,6 @@ function M.setnum_cmd(a)
         return
     end
     local proto = st.parsed.protos[st.proto_idx]
-
     local target_ins = nil
     for _, ins in ipairs(st.instrs) do
         if ins.name == "LOADN" and ins.d == old_val then
@@ -399,15 +489,12 @@ function M.setnum_cmd(a)
             if ins.b == old_val then target_ins = ins; break end
         end
     end
-
     if not target_ins then
         console.log("not found: " .. old_val, C.err)
         return
     end
-
     console.log("patching pc=" .. target_ins.word_idx .. " " .. target_ins.name
         .. " " .. old_val .. " -> " .. new_val, C.accent)
-
     if target_ins.name == "LOADN" then
         M.apply_edit_loadn(target_ins, new_val)
     elseif target_ins.name == "LOADK" then
