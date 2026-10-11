@@ -254,7 +254,6 @@ function M.start(bc)
         t:Create(panel, info, {Size = min and UDim2.new(1, 0, 0, 0) or UDim2.new(1, 0, 0, 180)}):Play()
     end)
 
-    -- Базовые команды
     M.register("help", function()
         M.log("commands:", C.accent)
         for name, cmd in pairs(commands) do
