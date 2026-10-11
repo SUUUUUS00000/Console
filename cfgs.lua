@@ -13,18 +13,18 @@ local COND_OPS = {
     JUMPXEQKN = true, JUMPXEQKS = true,
 }
 
+local function find_ins_at(instrs, pc)
+    for _, other in ipairs(instrs) do
+        if other.word_idx == pc then return other end
+    end
+    return nil
+end
+
 local function find_prev_before(instrs, pc)
     for _, other in ipairs(instrs) do
         if other.word_idx + other.length == pc then
             return other
         end
-    end
-    return nil
-end
-
-local function find_ins_at(instrs, pc)
-    for _, other in ipairs(instrs) do
-        if other.word_idx == pc then return other end
     end
     return nil
 end
@@ -36,7 +36,6 @@ function M.analyze(instrs)
 
     local structs = {}
 
-    -- 1. while: JUMPBACK
     for _, ins in ipairs(instrs) do
         if ins.name == "JUMPBACK" then
             local top = disasm.jump_target(ins)
@@ -53,7 +52,6 @@ function M.analyze(instrs)
         end
     end
 
-    -- 2. repeat: условный обратный переход
     for _, ins in ipairs(instrs) do
         if ins.name == "JUMPIF" or ins.name == "JUMPIFNOT" then
             local t = disasm.jump_target(ins)
@@ -70,7 +68,6 @@ function M.analyze(instrs)
         end
     end
 
-    -- 3. if / if-else: условный переход вперёд
     for _, ins in ipairs(instrs) do
         if COND_OPS[ins.name] then
             local t = disasm.jump_target(ins)
@@ -111,7 +108,6 @@ function M.analyze(instrs)
         end
     end
 
-    -- 4. numeric for: FORNPREP ... FORNLOOP
     for _, ins in ipairs(instrs) do
         if ins.name == "FORNPREP" then
             local body_start = ins.word_idx + ins.length
@@ -131,7 +127,6 @@ function M.analyze(instrs)
         end
     end
 
-    -- 5. generic for: FORGPREP ... FORGLOOP
     for _, ins in ipairs(instrs) do
         if ins.name == "FORGPREP" or ins.name == "FORGPREP_INEXT" or ins.name == "FORGPREP_NEXT" then
             local check_pc = disasm.jump_target(ins)
@@ -150,13 +145,11 @@ function M.analyze(instrs)
         end
     end
 
-    -- Сортировка: внешние первыми (start asc, end desc)
     table.sort(structs, function(a, b)
         if a.header_pc ~= b.header_pc then return a.header_pc < b.header_pc end
         return a.end_pc > b.end_pc
     end)
 
-    -- Назначение имён
     local counters = { if_ = 0, else_ = 0, while_ = 0, repeat_ = 0, for_ = 0, end_ = 0 }
     local labels = {}
     local ends = {}
@@ -194,7 +187,6 @@ function M.analyze(instrs)
         end
     end
 
-    -- Метки конца: собираем по pc, вставляем в начало (внутренние первыми)
     for _, s in ipairs(structs) do
         if s.end_label then
             ends[s.end_pc] = ends[s.end_pc] or {}
@@ -202,7 +194,6 @@ function M.analyze(instrs)
         end
     end
 
-    -- Отступы: считаем, сколько блоков содержат pc
     local indents = {}
     for _, ins in ipairs(instrs) do
         local pc = ins.word_idx
