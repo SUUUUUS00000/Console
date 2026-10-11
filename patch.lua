@@ -45,7 +45,7 @@ end
 
 local function edit_loadn_bytes(data, ins, newval)
     if ins.name ~= "LOADN" then return nil, "not LOADN" end
-    if newval < -32768 or newval > 32767 then return nil, "out of range [-32768..32767]" end
+    if newval < -32768 or newval > 32767 then return nil, "out of range" end
     newval = math.floor(newval)
     local nw = parser.OPIDX["LOADN"] + ins.a * 256 + (newval % 0x10000) * 65536
     return patch_word(data, ins.byte_offset, nw)
@@ -62,7 +62,7 @@ local function edit_loadk_number_bytes(data, proto, k_index, newval)
     if not proto or not proto.constants then return nil, "no proto" end
     local c = proto.constants[k_index + 1]
     if not c then return nil, "const index out of range" end
-    if c.kind ~= 2 then return nil, "not a number constant (kind=" .. c.kind .. ")" end
+    if c.kind ~= 2 then return nil, "not a number constant" end
     if type(newval) ~= "number" then return nil, "value is not a number" end
     local offset = c.offset
     if not offset or offset < 1 or offset + 7 > #data then return nil, "const offset invalid" end
@@ -153,7 +153,7 @@ function M.load_script(name)
     if BC.modules.panel and BC.modules.panel.render_all then
         BC.modules.panel.render_all()
     end
-    console.log("loaded " .. s:GetFullName() .. " (v" .. parsed.version .. ", " .. #bc .. "b)", C.ok)
+    console.log("loaded " .. s:GetFullName() .. " (v" .. parsed.version .. ", scheme=" .. (parsed.scheme or "identity") .. ", " .. #bc .. "b)", C.ok)
 end
 
 function M.list_scripts()
@@ -188,7 +188,6 @@ function M.list_held()
 end
 
 function M.apply_edit(script, new_bytes)
-    local C = console.colors()
     local cl = getscriptclosure(script)
     if not cl then return false, "no closure" end
 
@@ -200,12 +199,10 @@ function M.apply_edit(script, new_bytes)
                 active_hooks[script] = {kind = "hookfunction", prev = prev, script = script}
                 return true
             end
-        else
-            return false, "loadbytecode rejected modified bytes"
         end
     end
 
-    return false, "loadbytecode unavailable - will use decompiler in next step"
+    return false, "loadbytecode unavailable - decompiler will replace this"
 end
 
 function M.revert_edit(script)
