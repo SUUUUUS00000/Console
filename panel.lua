@@ -310,6 +310,9 @@ local function get_source(force)
     if not r then return nil, "failed: " .. tostring(err) end
     cached_src = r
     cached_for_bytecode = st.working
+    if st and not st.original_src then
+        st.original_src = r
+    end
     return r, kind
 end
 
@@ -816,6 +819,14 @@ local function do_save()
     if not st or not st.script then
         console.log("no script", P.err)
         return
+    end
+    if mode == "edit" then
+        local new_src = ed_get_code()
+        local prev = cached_src or ""
+        if new_src ~= prev then
+            st.user_src = new_src
+            is_dirty = true
+        end
     end
     if not is_dirty and not st.dirty and not st.user_src then
         console.log("nothing to save", P.dim)
