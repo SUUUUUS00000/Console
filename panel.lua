@@ -431,9 +431,7 @@ end
 
 local function revert_all()
     local st = patch and patch.state
-    if st then
-        st.user_src = nil
-    end
+    if st then st.user_src = nil end
     is_dirty = false
     cached_src = nil
     cached_for_bytecode = nil
@@ -521,7 +519,6 @@ function M.start()
     header_sep.BorderSizePixel = 0
     header_sep.Parent = header
 
-    -- Badge (SVG-like "signal bars" glyph)
     local badge = Instance.new("Frame")
     badge.Size = UDim2.new(0, 22, 0, 22)
     badge.Position = UDim2.new(0, 8, 0.5, -11)
@@ -659,7 +656,6 @@ function M.start()
     right_sep.BorderSizePixel = 0
     right_sep.Parent = right_pane
 
-    -- View frame
     right_view_frame = Instance.new("Frame")
     right_view_frame.Size = UDim2.new(1, 0, 1, -20)
     right_view_frame.Position = UDim2.new(0, 0, 0, 20)
@@ -693,7 +689,6 @@ function M.start()
     right_view_content.AutomaticSize = Enum.AutomaticSize.XY
     right_view_content.Parent = right_view_scroll
 
-    -- Edit frame
     right_edit_frame = Instance.new("Frame")
     right_edit_frame.Size = UDim2.new(1, 0, 1, -20)
     right_edit_frame.Position = UDim2.new(0, 0, 0, 20)
@@ -731,7 +726,7 @@ function M.start()
     right_edit_box.AutomaticSize = Enum.AutomaticSize.XY
     right_edit_box.Parent = right_edit_scroll
 
-    right_edit_box.TextChanged:Connect(function()
+    right_edit_box:GetPropertyChangedSignal("Text"):Connect(function()
         if loading_edit then return end
         is_dirty = true
         update_header()
