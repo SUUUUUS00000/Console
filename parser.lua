@@ -16,6 +16,8 @@ local OPNAMES = {
 "NEWCLASS","CONSTRUCT","FINCONSTRUCT"
 }
 
+local NOPS = #OPNAMES
+
 local TWO_WORD = {}
 for _, n in ipairs({
 "GETGLOBAL","SETGLOBAL","GETIMPORT","GETTABLEKS","SETTABLEKS","NAMECALL",
@@ -25,6 +27,16 @@ for _, n in ipairs({
 "NAMECALLUDATA","NEWCLASSMEMBER","CALLFB","CMPPROTO","NEWCLASS","CONSTRUCT"
 }) do
     TWO_WORD[n] = true
+end
+
+local JUMPD_OPS = {}
+for _, n in ipairs({
+"JUMP","JUMPIF","JUMPIFNOT","JUMPIFEQ","JUMPIFLE","JUMPIFLT","JUMPIFNOTEQ",
+"JUMPIFNOTLE","JUMPIFNOTLT","FORNPREP","FORNLOOP","FORGPREP","FORGLOOP",
+"FORGPREP_INEXT","FORGPREP_NEXT","JUMPBACK",
+"JUMPXEQKNIL","JUMPXEQKB","JUMPXEQKN","JUMPXEQKS"
+}) do
+    JUMPD_OPS[n] = true
 end
 
 local OPIDX = {}
@@ -81,6 +93,104 @@ local function rd_double(d, pos)
     return v, pos + 8
 end
 
+--========= OPCODE SCHEME DETECTION =========
+
+local function proto_ok(proto, dec)
+    local code = proto.code_words
+    local n = #code
+    if n == 0 then return true end
+    local i = 1
+    local last_op = nil
+    while i <= n do
+        local w = code[i]
+        local enc = w % 256
+        local real = dec[enc]
+        if real == nil or real >= NOPS then return false end
+        local name = OPNAMES[real + 1]
+        if not name then return false end
+        local two = TWO_WORD[name]
+        local ln = two and 2 or 1
+        if i + ln - 1 > n then return false end
+        last_op = real
+        if JUMPD_OPS[name] then
+            local d = s16(math.floor(w / 65536) % 65536)
+            local t = i + d + ln
+            if t < 1 or t > n + 1 then return false end
+        elseif name == "JUMPX" then
+            local e = s24(math.floor(w / 256) % 16777216)
+            local t = i + e + 1
+            if t < 1 or t > n + 1 then return false end
+        end
+        i = i + ln
+    end
+    if i ~= n + 1 then return false end
+    if last_op and last_op ~= 22 then return false end
+    return true
+end
+
+local function build_candidates()
+    local list = {}
+    do
+        local t = {}
+        for x = 0, 255 do t[x] = x end
+        list[#list+1] = {name = "identity", dec = t}
+    end
+    local tried = { [1] = true, [203] = true, [227] = true }
+    local order = {227, 203, 37}
+    for _, k in ipairs(order) do
+        local t = {}
+        for x = 0, 255 do t[x] = (x * k) % 256 end
+        list[#list+1] = {name = "mul " .. k, dec = t}
+    end
+    for k = 1, 255, 2 do
+        if not tried[k] then
+            local t = {}
+            for x = 0, 255 do t[x] = (x * k) % 256 end
+            list[#list+1] = {name = "mul " .. k, dec = t}
+        end
+    end
+    for k = 1, 255 do
+        local t = {}
+        for x = 0, 255 do t[x] = bit32.bxor(x, k) end
+        list[#list+1] = {name = "xor " .. k, dec = t}
+    end
+    return list
+end
+
+local function detect_scheme(protos)
+    local cands = build_candidates()
+    for _, c in ipairs(cands) do
+        local ok_all = true
+        for _, p in ipairs(protos) do
+            if not proto_ok(p, c.dec) then
+                ok_all = false
+                break
+            end
+        end
+        if ok_all then return c end
+    end
+    return nil
+end
+
+local function apply_scheme(protos, scheme)
+    for _, p in ipairs(protos) do
+        local code = p.code_words
+        local i = 1
+        while i <= #code do
+            local w = code[i]
+            local enc = w % 256
+            local real = scheme.dec[enc]
+            local hi = math.floor(w / 256) * 256
+            code[i] = hi + real
+            local name = OPNAMES[real + 1]
+            local two = name and TWO_WORD[name]
+            i = i + (two and 2 or 1)
+        end
+    end
+end
+
+--========= PARSER =========
+
 local function parse_impl(data)
     local pos = 1
     local version = rd_u8(data, pos)
@@ -129,7 +239,6 @@ local function parse_impl(data)
     local protos = {}
 
     for i = 1, pcount do
-        -- ИСПРАВЛЕНО: proto_start устанавливается ПОСЛЕ чтения proto_size
         local proto_size = 0
         if version >= 12 then
             proto_size, pos = rd_var(data, pos)
@@ -329,7 +438,23 @@ local function parse_impl(data)
     local main_idx
     main_idx, pos = rd_var(data, pos)
     if not main_idx then return nil, "eof@main" end
-    return {version = version, typesversion = typesversion, strings = strings, protos = protos, main = main_idx}
+
+    local result = {
+        version = version,
+        typesversion = typesversion,
+        strings = strings,
+        protos = protos,
+        main = main_idx,
+        scheme = "identity"
+    }
+
+    local scheme = detect_scheme(protos)
+    if scheme and scheme.name ~= "identity" then
+        apply_scheme(protos, scheme)
+        result.scheme = scheme.name
+    end
+
+    return result
 end
 
 function M.parse(data)
