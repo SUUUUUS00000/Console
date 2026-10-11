@@ -55,10 +55,10 @@ local P = {
     ok         = px(120, 200, 120),
     warn       = px(230, 180, 90),
     err        = px(230, 95, 95),
+    scroll     = px(150, 150, 150),
 }
 
 local FONT = Enum.Font.Arcade
-local FONT_CODE = Enum.Font.Code
 local TSIZE = 14
 local LINE_H = 14
 
@@ -251,6 +251,13 @@ local function mk_button(parent, text, w, x, y, primary)
     b.AutoButtonColor = false
     b.Parent = parent
     return b
+end
+
+local function setup_scroll(sf)
+    sf.ScrollBarThickness = 8
+    sf.ScrollBarImageColor3 = P.scroll
+    sf.ScrollBarImageTransparency = 0.2
+    sf.ElasticBehavior = Enum.ElasticBehavior.Never
 end
 
 local function drag_begin(frame)
@@ -661,10 +668,9 @@ function M.start()
     left_scroll.Size = UDim2.new(1, 0, 1, 0)
     left_scroll.BackgroundTransparency = 1
     left_scroll.BorderSizePixel = 0
-    left_scroll.ScrollBarThickness = 5
-    left_scroll.ScrollBarImageColor3 = P.border
     left_scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
     left_scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    setup_scroll(left_scroll)
     left_scroll.Parent = left_pane
 
     local left_layout = Instance.new("UIListLayout")
@@ -685,7 +691,7 @@ function M.start()
     right_pane.ClipsDescendants = true
     right_pane.Parent = bp
 
-    local GUTTER_W = 28
+    local GUTTER_W = 34
     right_gutter = Instance.new("Frame")
     right_gutter.Size = UDim2.new(0, GUTTER_W, 1, 0)
     right_gutter.BackgroundColor3 = P.gutter
@@ -713,11 +719,10 @@ function M.start()
     right_view_scroll.Size = UDim2.new(1, 0, 1, 0)
     right_view_scroll.BackgroundTransparency = 1
     right_view_scroll.BorderSizePixel = 0
-    right_view_scroll.ScrollBarThickness = 5
-    right_view_scroll.ScrollBarImageColor3 = P.border
     right_view_scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
     right_view_scroll.AutomaticCanvasSize = Enum.AutomaticSize.XY
     right_view_scroll.ScrollingDirection = Enum.ScrollingDirection.XY
+    setup_scroll(right_view_scroll)
     right_view_scroll.Parent = right_view_frame
 
     right_view_content = Instance.new("TextLabel")
@@ -729,7 +734,7 @@ function M.start()
     right_view_content.TextColor3 = P.txt
     right_view_content.TextXAlignment = Enum.TextXAlignment.Left
     right_view_content.TextYAlignment = Enum.TextYAlignment.Top
-    right_view_content.Font = FONT_CODE
+    right_view_content.Font = FONT
     right_view_content.TextSize = TSIZE
     right_view_content.TextWrapped = false
     right_view_content.LineHeight = 1
@@ -750,11 +755,10 @@ function M.start()
     right_edit_scroll.Size = UDim2.new(1, 0, 1, 0)
     right_edit_scroll.BackgroundTransparency = 1
     right_edit_scroll.BorderSizePixel = 0
-    right_edit_scroll.ScrollBarThickness = 5
-    right_edit_scroll.ScrollBarImageColor3 = P.border
     right_edit_scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
     right_edit_scroll.AutomaticCanvasSize = Enum.AutomaticSize.XY
     right_edit_scroll.ScrollingDirection = Enum.ScrollingDirection.XY
+    setup_scroll(right_edit_scroll)
     right_edit_scroll.Parent = right_edit_frame
 
     right_edit_display = Instance.new("TextLabel")
@@ -766,7 +770,7 @@ function M.start()
     right_edit_display.TextColor3 = P.txt
     right_edit_display.TextXAlignment = Enum.TextXAlignment.Left
     right_edit_display.TextYAlignment = Enum.TextYAlignment.Top
-    right_edit_display.Font = FONT_CODE
+    right_edit_display.Font = FONT
     right_edit_display.TextSize = TSIZE
     right_edit_display.TextWrapped = false
     right_edit_display.LineHeight = 1
@@ -783,7 +787,7 @@ function M.start()
     right_edit_box.TextTransparency = 1
     right_edit_box.TextXAlignment = Enum.TextXAlignment.Left
     right_edit_box.TextYAlignment = Enum.TextYAlignment.Top
-    right_edit_box.Font = FONT_CODE
+    right_edit_box.Font = FONT
     right_edit_box.TextSize = TSIZE
     right_edit_box.LineHeight = 1
     right_edit_box.TextWrapped = false
