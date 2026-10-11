@@ -9,6 +9,7 @@ local MODULES = {
     "disasm",
     "names",
     "varflow",
+    "ssa",
     "cfgs",
     "patch",
     "panel",
