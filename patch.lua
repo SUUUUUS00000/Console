@@ -2,7 +2,7 @@ local M = {}
 M.name = "patch"
 
 local BC
-local console, parser, disasm
+local console, parser, disasm, decompile
 
 local l = game:GetService("Players").LocalPlayer
 
@@ -187,10 +187,43 @@ function M.list_held()
     end
 end
 
+-- Декомпиляция текущего прототипа в исходник
+function M.decompile_current()
+    local st = M.state
+    if not st or not st.parsed or not st.instrs then
+        return nil, "no script loaded"
+    end
+    local proto = st.parsed.protos[st.proto_idx]
+    local ssa_data = nil
+    if BC.modules.ssa and BC.modules.ssa.build then
+        local ok, r = pcall(BC.modules.ssa.build, st.instrs, proto)
+        if ok then ssa_data = r end
+    end
+    local expr_db = nil
+    if BC.modules.expr and BC.modules.expr.build and ssa_data then
+        local ok, r = pcall(BC.modules.expr.build, ssa_data, proto, st.instrs)
+        if ok then expr_db = r end
+    end
+    local cfg = nil
+    if BC.modules.cfgs and BC.modules.cfgs.analyze then
+        local ok, r = pcall(BC.modules.cfgs.analyze, st.instrs)
+        if ok then cfg = r end
+    end
+    if not decompile or not decompile.from_proto then
+        return nil, "no decompiler module"
+    end
+    local ok, src = pcall(decompile.from_proto, proto, st.instrs, ssa_data, expr_db, cfg)
+    if not ok then return nil, tostring(src) end
+    return src
+end
+
+-- Применение изменений
 function M.apply_edit(script, new_bytes)
+    local C = console.colors()
     local cl = getscriptclosure(script)
     if not cl then return false, "no closure" end
 
+    -- 1. Сначала пробуем loadbytecode
     if typeof(loadbytecode) == "function" then
         local ok, fn = pcall(loadbytecode, new_bytes)
         if ok and fn then
@@ -202,7 +235,32 @@ function M.apply_edit(script, new_bytes)
         end
     end
 
-    return false, "loadbytecode unavailable - decompiler will replace this"
+    -- 2. Fallback: декомпилируем и грузим через loadstring
+    if typeof(loadstring) == "function" then
+        local src, err = M.decompile_current()
+        if not src then
+            return false, "decompile failed: " .. tostring(err)
+        end
+        local fn, load_err = loadstring(src, "@" .. script.Name)
+        if not fn then
+            return false, "loadstring failed: " .. tostring(load_err)
+        end
+        local wrapped = function(...)
+            local ok, result = pcall(fn, ...)
+            if not ok then
+                console.log("[apply] runtime: " .. tostring(result), C.err)
+            end
+            return result
+        end
+        local prev = hookfunction and hookfunction(cl, wrapped)
+        if prev then
+            active_hooks[script] = {kind = "hookfunction", prev = prev, script = script}
+            return true
+        end
+        return false, "hookfunction failed"
+    end
+
+    return false, "no apply method available"
 end
 
 function M.revert_edit(script)
@@ -312,6 +370,7 @@ function M.init(bc)
     console = bc.modules.console
     parser = bc.modules.parser
     disasm = bc.modules.disasm
+    decompile = bc.modules.decompile
 end
 
 return M
