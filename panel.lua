@@ -2,101 +2,478 @@ local M = {}
 M.name = "panel"
 
 local BC
-local console, parser, disasm, cfgs, patch, names, varflow, ssa, expr
+local console, parser, patch, decompile
 
 local C
 local gui_root
 local p_sg
-local bp, bpHead, bpTitle
-local bpLeft, bpLeftScroll, bpRight, bpRightScroll
-local bpFoot, bpExit, bpApply
+local bp
+local header_info, status_dot
+local left_pane, left_scroll
+local right_pane
+local right_view_frame, right_view_scroll, right_view_content
+local right_edit_frame, right_edit_scroll, right_edit_box
+local footer
+local btn_decompile, btn_edit, btn_revert, btn_exit, btn_save
 
-local hex_lines = {}
-local dis_lines = {}
-local selected_byte = -1
-local ssa_error_reported = false
-local expr_error_reported = false
-local bp_first_show = true
-local last_bp_pos = nil
+local mode = "view"
+local cached_src = nil
+local cached_for_bytecode = nil
+local is_dirty = false
+local loading_edit = false
 
-local DRAG_THRESHOLD = 8
-
-local drag_frame = nil
-local drag_start_pos = nil
-local drag_start_frame = nil
-local drag_pending = false
-local drag_active = false
+local dragOn, dragStart, dragPos, dragFrame, dragMoved
+local DRAG_THRESHOLD = 6
 
 local u = game:GetService("UserInputService")
 local cam = workspace.CurrentCamera
 
-local function begin_drag(frame)
+--=====================================================================
+-- SYNTAX HIGHLIGHTING
+--=====================================================================
+
+local KEYWORDS = {
+    ["and"]=1,["break"]=1,["do"]=1,["else"]=1,["elseif"]=1,["end"]=1,["false"]=1,
+    ["for"]=1,["function"]=1,["if"]=1,["in"]=1,["local"]=1,["nil"]=1,["not"]=1,
+    ["or"]=1,["repeat"]=1,["return"]=1,["then"]=1,["true"]=1,["until"]=1,
+    ["while"]=1,["continue"]=1,["export"]=1,["type"]=1,
+}
+
+local BUILTINS = {
+    ["game"]=1,["workspace"]=1,["script"]=1,["task"]=1,["print"]=1,["warn"]=1,
+    ["error"]=1,["assert"]=1,["pcall"]=1,["xpcall"]=1,["require"]=1,["spawn"]=1,
+    ["wait"]=1,["delay"]=1,["tick"]=1,["time"]=1,["typeof"]=1,
+    ["pairs"]=1,["ipairs"]=1,["next"]=1,["select"]=1,["unpack"]=1,
+    ["rawget"]=1,["rawset"]=1,["rawequal"]=1,["rawlen"]=1,
+    ["setmetatable"]=1,["getmetatable"]=1,
+    ["tostring"]=1,["tonumber"]=1,
+    ["Instance"]=1,["Vector3"]=1,["Vector2"]=1,["CFrame"]=1,["Color3"]=1,
+    ["UDim2"]=1,["UDim"]=1,["TweenInfo"]=1,["Enum"]=1,
+    ["shared"]=1,["_G"]=1,["_VERSION"]=1,
+    ["vector"]=1,["buffer"]=1,["bit32"]=1,["utf8"]=1,
+}
+
+local HL = {
+    keyword = "#c586c0",
+    string  = "#ce9178",
+    number  = "#b5cea8",
+    comment = "#6a9955",
+    ident   = "#9cdcfe",
+    builtin = "#4ec9b0",
+    op      = "#d4d4d4",
+}
+
+local function is_ws(c)
+    return c == " " or c == "\t" or c == "\n" or c == "\r"
+end
+
+local function is_digit(c)
+    return c >= "0" and c <= "9"
+end
+
+local function is_alpha(c)
+    return (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or c == "_"
+end
+
+local function is_alnum(c)
+    return is_alpha(c) or is_digit(c)
+end
+
+local function tokenize(src)
+    local tokens = {}
+    local i, n = 1, #src
+    while i <= n do
+        local c = src:sub(i, i)
+        if is_ws(c) then
+            local j = i
+            while j <= n and is_ws(src:sub(j, j)) do j = j + 1 end
+            tokens[#tokens + 1] = {t = "ws", v = src:sub(i, j - 1)}
+            i = j
+        elseif c == "-" and src:sub(i + 1, i + 1) == "-" then
+            if src:sub(i, i + 3) == "--[[" then
+                local j = src:find("]]", i + 4, true)
+                if j then
+                    tokens[#tokens + 1] = {t = "comment", v = src:sub(i, j + 1)}
+                    i = j + 2
+                else
+                    tokens[#tokens + 1] = {t = "comment", v = src:sub(i)}
+                    i = n + 1
+                end
+            else
+                local j = src:find("\n", i, true) or (n + 1)
+                tokens[#tokens + 1] = {t = "comment", v = src:sub(i, j - 1)}
+                i = j
+            end
+        elseif c == '"' or c == "'" then
+            local j = i + 1
+            while j <= n do
+                local cc = src:sub(j, j)
+                if cc == "\\" then j = j + 2
+                elseif cc == c then j = j + 1; break
+                else j = j + 1 end
+            end
+            tokens[#tokens + 1] = {t = "string", v = src:sub(i, j - 1)}
+            i = j
+        elseif c == "`" then
+            local j = i + 1
+            while j <= n do
+                local cc = src:sub(j, j)
+                if cc == "\\" then j = j + 2
+                elseif cc == "`" then j = j + 1; break
+                else j = j + 1 end
+            end
+            tokens[#tokens + 1] = {t = "string", v = src:sub(i, j - 1)}
+            i = j
+        elseif is_digit(c) or (c == "." and is_digit(src:sub(i + 1, i + 1))) then
+            local j = i
+            if c == "0" and src:sub(i + 1, i + 1):lower() == "x" then
+                j = i + 2
+                while j <= n and src:sub(j, j):match("[%x]") do j = j + 1 end
+                if src:sub(j, j) == "i" then j = j + 1 end
+            else
+                local seen_dot, seen_e = false, false
+                while j <= n do
+                    local cc = src:sub(j, j)
+                    if is_digit(cc) then j = j + 1
+                    elseif cc == "." and not seen_dot and not seen_e then
+                        seen_dot = true; j = j + 1
+                    elseif (cc == "e" or cc == "E") and not seen_e then
+                        seen_e = true; j = j + 1
+                        if src:sub(j, j) == "+" or src:sub(j, j) == "-" then j = j + 1 end
+                    elseif cc == "i" and not seen_e and not seen_dot then
+                        j = j + 1; break
+                    else break end
+                end
+            end
+            tokens[#tokens + 1] = {t = "number", v = src:sub(i, j - 1)}
+            i = j
+        elseif is_alpha(c) then
+            local j = i
+            while j <= n and is_alnum(src:sub(j, j)) do j = j + 1 end
+            local word = src:sub(i, j - 1)
+            local t = "ident"
+            if KEYWORDS[word] then t = "keyword"
+            elseif BUILTINS[word] then t = "builtin" end
+            tokens[#tokens + 1] = {t = t, v = word}
+            i = j
+        else
+            local three = src:sub(i, i + 2)
+            local two = src:sub(i, i + 1)
+            if three == "..." then
+                tokens[#tokens + 1] = {t = "op", v = "..."}
+                i = i + 3
+            elseif two == "==" or two == "~=" or two == "<=" or two == ">="
+                or two == ".." or two == "//" or two == "::" or two == "->" then
+                tokens[#tokens + 1] = {t = "op", v = two}
+                i = i + 2
+            else
+                tokens[#tokens + 1] = {t = "op", v = c}
+                i = i + 1
+            end
+        end
+    end
+    return tokens
+end
+
+local function escape_rich(s)
+    s = s:gsub("&", "&amp;")
+    s = s:gsub("<", "&lt;")
+    s = s:gsub(">", "&gt;")
+    return s
+end
+
+local function highlight(src)
+    if #src > 200000 then
+        return "-- source too long to highlight (" .. #src .. " bytes)"
+    end
+    local tokens = tokenize(src)
+    local parts = {}
+    for _, tok in ipairs(tokens) do
+        if tok.t == "ws" then
+            parts[#parts + 1] = tok.v
+        else
+            local color = HL[tok.t] or HL.ident
+            parts[#parts + 1] = '<font color="' .. color .. '">' .. escape_rich(tok.v) .. '</font>'
+        end
+    end
+    return table.concat(parts)
+end
+
+--=====================================================================
+-- FRAME HELPERS
+--=====================================================================
+
+local function mk_button(parent, text, w, x, y, color)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(0, w, 0, 26)
+    b.Position = UDim2.new(0, x, 0.5, -13)
+    b.BackgroundColor3 = C.input
+    b.BorderSizePixel = 1
+    b.BorderColor3 = C.border
+    b.Text = text
+    b.TextColor3 = color or C.txt
+    b.Font = Enum.Font.Code
+    b.TextSize = 11
+    b.AutoButtonColor = false
+    b.Parent = parent
+    return b
+end
+
+local function drag_begin(frame)
     frame.InputBegan:Connect(function(i)
         if i.UserInputType == Enum.UserInputType.MouseButton1
-        or i.UserInputType == Enum.UserInputType.Touch then
-            drag_pending = true
-            drag_active = false
-            drag_frame = bp
-            drag_start_pos = i.Position
-            drag_start_frame = bp.Position
+            or i.UserInputType == Enum.UserInputType.Touch then
+            dragOn = true
+            dragMoved = false
+            dragFrame = bp
+            dragStart = i.Position
+            dragPos = bp.Position
         end
     end)
 end
 
 u.InputChanged:Connect(function(i)
-    if drag_pending and drag_frame and (i.UserInputType == Enum.UserInputType.MouseMovement
-    or i.UserInputType == Enum.UserInputType.Touch) then
-        local d = i.Position - drag_start_pos
-        if not drag_active then
-            if math.abs(d.X) + math.abs(d.Y) > DRAG_THRESHOLD then
-                drag_active = true
-            else
-                return
-            end
+    if dragOn and dragFrame and (i.UserInputType == Enum.UserInputType.MouseMovement
+        or i.UserInputType == Enum.UserInputType.Touch) then
+        local d = i.Position - dragStart
+        if not dragMoved then
+            if math.abs(d.X) + math.abs(d.Y) < DRAG_THRESHOLD then return end
+            dragMoved = true
         end
-
-        local newX = drag_start_frame.X.Offset + d.X
-        local newY = drag_start_frame.Y.Offset + d.Y
-
+        local nx = dragPos.X.Offset + d.X
+        local ny = dragPos.Y.Offset + d.Y
         local vp = cam.ViewportSize
-        local sz = drag_frame.AbsoluteSize
-        local minX = -(sz.X - 100)
-        local maxX = vp.X - 100
-        local minY = -6
-        local maxY = vp.Y - 40
-
-        if newX < minX then newX = minX end
-        if newX > maxX then newX = maxX end
-        if newY < minY then newY = minY end
-        if newY > maxY then newY = maxY end
-
-        drag_frame.Position = UDim2.new(0, newX, 0, newY)
+        local sz = dragFrame.AbsoluteSize
+        if nx < -(sz.X - 100) then nx = -(sz.X - 100) end
+        if nx > vp.X - 100 then nx = vp.X - 100 end
+        if ny < -6 then ny = -6 end
+        if ny > vp.Y - 40 then ny = vp.Y - 40 end
+        dragFrame.Position = UDim2.new(0, nx, 0, ny)
     end
 end)
 
 u.InputEnded:Connect(function(i)
     if i.UserInputType == Enum.UserInputType.MouseButton1
-    or i.UserInputType == Enum.UserInputType.Touch then
-        drag_pending = false
-        drag_active = false
-        drag_frame = nil
+        or i.UserInputType == Enum.UserInputType.Touch then
+        dragOn = false
+        dragMoved = false
+        dragFrame = nil
     end
 end)
 
-local function resolve_gui_root()
-    if console and console.gui_root then
-        local r = console.gui_root()
-        if r then return r end
+--=====================================================================
+-- RENDERING
+--=====================================================================
+
+local function clear_scroll(sc)
+    for _, v in ipairs(sc:GetChildren()) do
+        if v:IsA("Frame") then v:Destroy() end
     end
-    if gethui then
-        local ok, r = pcall(gethui)
-        if ok and r then return r end
-    end
-    return game:GetService("CoreGui")
 end
 
+local function render_hex()
+    clear_scroll(left_scroll)
+    local st = patch and patch.state
+    if not st or not st.working then
+        local l = Instance.new("TextLabel")
+        l.Size = UDim2.new(1, 0, 0, 20)
+        l.BackgroundTransparency = 1
+        l.Text = "  no bytecode"
+        l.TextColor3 = C.dim
+        l.Font = Enum.Font.Code
+        l.TextSize = 12
+        l.TextXAlignment = Enum.TextXAlignment.Left
+        l.Parent = left_scroll
+        return
+    end
+    local d = st.working
+    for i = 1, #d, 16 do
+        local chunk = string.sub(d, i, i + 15)
+        local hp = {}
+        for j = 1, #chunk do hp[j] = string.format("%02X", string.byte(chunk, j)) end
+        local hx = table.concat(hp, " ")
+        while #hx < 47 do hx = hx .. " " end
+        local asc = chunk:gsub("[^%g ]", ".")
+        local r = Instance.new("Frame")
+        r.Size = UDim2.new(1, 0, 0, 16)
+        r.BackgroundTransparency = 1
+        r.Parent = left_scroll
+        local lbl = Instance.new("TextLabel")
+        lbl.Size = UDim2.new(1, 0, 1, 0)
+        lbl.BackgroundTransparency = 1
+        lbl.Text = string.format("%06X  %s |%s|", i - 1, hx, asc)
+        lbl.TextColor3 = C.hex
+        lbl.Font = Enum.Font.Code
+        lbl.TextSize = 12
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.Parent = r
+    end
+end
+
+local function get_source(force)
+    local st = patch and patch.state
+    if not st or not st.working then return nil, "no script" end
+    if st.user_src then return st.user_src, "user" end
+    if not force and cached_src and cached_for_bytecode == st.working then
+        return cached_src, "cache"
+    end
+    if not decompile or not decompile.decompile_best then
+        return nil, "no decompiler"
+    end
+    local ok, result, kind, err = pcall(decompile.decompile_best, st.working)
+    if not ok then return nil, "decompile crash: " .. tostring(result) end
+    if not result then return nil, "decompile failed: " .. tostring(err) end
+    cached_src = result
+    cached_for_bytecode = st.working
+    return result, kind
+end
+
+local function render_source_view(force)
+    if mode == "edit" then
+        right_view_frame.Visible = false
+        right_edit_frame.Visible = true
+        return
+    end
+    right_view_frame.Visible = true
+    right_edit_frame.Visible = false
+
+    local st = patch and patch.state
+    if not st or not st.script then
+        right_view_content.Text = '<font color="#606060">-- no script loaded</font>'
+        return
+    end
+    local src, kind = get_source(force)
+    if not src then
+        right_view_content.Text = '<font color="#dc6e6e">-- ' .. escape_rich(tostring(kind)) .. '</font>'
+        return
+    end
+    right_view_content.Text = highlight(src)
+end
+
+local function update_header()
+    local st = patch and patch.state
+    local parts = {}
+    if st and st.script then
+        parts[#parts + 1] = st.script.Name
+        if st.parsed then
+            parts[#parts + 1] = "proto " .. st.proto_idx .. "/" .. #st.parsed.protos
+            parts[#parts + 1] = (st.parsed.scheme or "?")
+        end
+        parts[#parts + 1] = #st.working .. " b"
+    else
+        parts[#parts + 1] = "no script loaded"
+    end
+    header_info.Text = "   " .. table.concat(parts, "   ·   ")
+
+    local dot_c = C.dim
+    if st and st.script then
+        if is_dirty then dot_c = C.warn else dot_c = C.ok end
+    end
+    status_dot.BackgroundColor3 = dot_c
+
+    if is_dirty then
+        btn_save.BackgroundColor3 = Color3.fromRGB(36, 90, 50)
+        btn_save.BorderColor3 = Color3.fromRGB(80, 180, 90)
+        btn_save.TextColor3 = Color3.fromRGB(220, 255, 220)
+    else
+        btn_save.BackgroundColor3 = C.input
+        btn_save.BorderColor3 = C.border
+        btn_save.TextColor3 = C.dim
+    end
+
+    if mode == "edit" then
+        btn_edit.Text = "DONE"
+        btn_edit.TextColor3 = C.ok
+    else
+        btn_edit.Text = "EDIT"
+        btn_edit.TextColor3 = C.txt
+    end
+end
+
+function M.render_all()
+    render_hex()
+    render_source_view(false)
+    update_header()
+end
+
+--=====================================================================
+-- MODE SWITCH
+--=====================================================================
+
+local function enter_edit_mode()
+    loading_edit = true
+    mode = "edit"
+    local src = get_source(false) or ""
+    right_edit_box.Text = src
+    loading_edit = false
+    is_dirty = false
+    render_source_view(false)
+    update_header()
+end
+
+local function exit_edit_mode()
+    mode = "view"
+    local st = patch and patch.state
+    local new_src = right_edit_box.Text
+    local prev_src = cached_src or ""
+    if st then
+        if new_src ~= prev_src then
+            st.user_src = new_src
+            is_dirty = true
+        else
+            st.user_src = nil
+            is_dirty = false
+        end
+    end
+    render_source_view(true)
+    update_header()
+end
+
+local function revert_all()
+    local st = patch and patch.state
+    if st then
+        st.user_src = nil
+    end
+    is_dirty = false
+    cached_src = nil
+    cached_for_bytecode = nil
+    if patch and patch.revert then patch.revert() end
+    M.render_all()
+end
+
+local function do_save()
+    local Cc = console.colors()
+    local st = patch and patch.state
+    if not st or not st.script then
+        console.log("no script", Cc.err)
+        return
+    end
+    if not is_dirty and not st.dirty and not st.user_src then
+        console.log("nothing to save", Cc.dim)
+        return
+    end
+    if not patch or not patch.do_apply then
+        console.log("no apply method", Cc.err)
+        return
+    end
+    patch.do_apply()
+    is_dirty = false
+    cached_src = nil
+    cached_for_bytecode = nil
+    M.render_all()
+end
+
+--=====================================================================
+-- BUILD
+--=====================================================================
+
 local function ensure_sg()
-    gui_root = resolve_gui_root()
+    gui_root = console.gui_root()
+    if not gui_root and gethui then
+        local ok, r = pcall(gethui)
+        if ok and r then gui_root = r end
+    end
+    if not gui_root then gui_root = game:GetService("CoreGui") end
     if p_sg and p_sg.Parent == gui_root then return p_sg end
     if p_sg then p_sg:Destroy() end
     p_sg = Instance.new("ScreenGui")
@@ -108,840 +485,328 @@ local function ensure_sg()
     return p_sg
 end
 
-local function clear_hex()
-    for _, v in ipairs(bpLeftScroll:GetChildren()) do
-        if v:IsA("Frame") then v:Destroy() end
-    end
-    hex_lines = {}
-end
-
-local function clear_dis()
-    for _, v in ipairs(bpRightScroll:GetChildren()) do
-        if v:IsA("Frame") then v:Destroy() end
-    end
-    dis_lines = {}
-end
-
-local function clear_highlight()
-    for _, l in ipairs(hex_lines) do
-        if l.f then l.f.BackgroundTransparency = 1 end
-    end
-    for _, l in ipairs(dis_lines) do
-        if l.f then l.f.BackgroundTransparency = 1 end
-    end
-end
-
-local function select_line(byte_offset)
-    selected_byte = byte_offset
-    clear_highlight()
-
-    local hi = math.floor(byte_offset / 16)
-    if hex_lines[hi + 1] and hex_lines[hi + 1].f then
-        hex_lines[hi + 1].f.BackgroundTransparency = 0.7
-        hex_lines[hi + 1].f.BackgroundColor3 = C.accent
-    end
-
-    local dis_idx = nil
-    for i, l in ipairs(dis_lines) do
-        if l.byte_offset == byte_offset then
-            l.f.BackgroundTransparency = 0.85
-            l.f.BackgroundColor3 = C.accent
-            dis_idx = i
-            break
-        end
-    end
-
-    local y = math.max(0, hi * 16 - 60)
-    bpLeftScroll.CanvasPosition = Vector2.new(0, y)
-
-    if dis_idx then
-        local dy = math.max(0, (dis_idx - 1) * 20 - 80)
-        bpRightScroll.CanvasPosition = Vector2.new(0, dy)
-    end
-end
-
-local function attach_tap(row, byte_offset)
-    local tap_start = nil
-    row.InputBegan:Connect(function(i)
-        if i.UserInputType == Enum.UserInputType.MouseButton1
-        or i.UserInputType == Enum.UserInputType.Touch then
-            tap_start = i.Position
-        end
-    end)
-    row.InputEnded:Connect(function(i)
-        if i.UserInputType == Enum.UserInputType.MouseButton1
-        or i.UserInputType == Enum.UserInputType.Touch then
-            if tap_start then
-                local d = i.Position - tap_start
-                if math.abs(d.X) + math.abs(d.Y) < DRAG_THRESHOLD then
-                    select_line(byte_offset)
-                end
-                tap_start = nil
-            end
-        end
-    end)
-end
-
-local function render_hex()
-    clear_hex()
-    local st = patch and patch.state
-    if not st or not st.working then return end
-    local d = st.working
-    local count = 0
-    for i = 1, #d, 16 do
-        count = count + 1
-        if count > 4000 then
-            local r = Instance.new("Frame")
-            r.Size = UDim2.new(1, 0, 0, 16)
-            r.BackgroundTransparency = 1
-            r.Parent = bpLeftScroll
-            local t2 = Instance.new("TextLabel")
-            t2.Size = UDim2.new(1, 0, 1, 0)
-            t2.BackgroundTransparency = 1
-            t2.Text = "... truncated ..."
-            t2.TextColor3 = C.dim
-            t2.Font = Enum.Font.Code
-            t2.TextSize = 12
-            t2.TextXAlignment = Enum.TextXAlignment.Left
-            t2.Parent = r
-            break
-        end
-        local chunk = string.sub(d, i, i + 15)
-        local hp = {}
-        for j = 1, #chunk do hp[j] = string.format("%02X", string.byte(chunk, j)) end
-        local hx = table.concat(hp, " ")
-        while #hx < 47 do hx = hx .. " " end
-        local asc = chunk:gsub("[^%g ]", ".")
-
-        local r = Instance.new("Frame")
-        r.Size = UDim2.new(1, 0, 0, 16)
-        r.BackgroundTransparency = 1
-        r.Parent = bpLeftScroll
-
-        local lbl = Instance.new("TextLabel")
-        lbl.Size = UDim2.new(1, 0, 1, 0)
-        lbl.BackgroundTransparency = 1
-        lbl.Text = string.format("%06X  %s |%s|", i - 1, hx, asc)
-        lbl.TextColor3 = C.hex
-        lbl.Font = Enum.Font.Code
-        lbl.TextSize = 12
-        lbl.TextXAlignment = Enum.TextXAlignment.Left
-        lbl.Parent = r
-
-        table.insert(hex_lines, {f = r, offset = i - 1})
-    end
-end
-
-local function fmt_expr(ins, ssa_data, expr_db, proto, labels)
-    if not ssa_data then
-        return disasm.fmt(ins, proto, labels, {})
-    end
-
-    local pc = ins.word_idx
-    local reads = ssa_data.read_at[pc] or {}
-    local writes = ssa_data.write_at[pc] or {}
-
-    local function W(reg)
-        local v = writes[reg]
-        if v then return ssa_data.name_of[v] or ("t" .. v) end
-        return "R" .. reg
-    end
-
-    local function R(reg)
-        local v = reads[reg]
-        if not v then return "R" .. reg end
-        local e = expr_db and expr_db.get(v)
-        if e then return e.code end
-        return ssa_data.name_of[v] or ("t" .. v)
-    end
-
-    local function cstr(i) return disasm.const_str(proto, i) end
-    local function L(t)
-        if labels and labels[t] then return labels[t] end
-        return string.format("%+d", t - ins.word_idx - ins.length)
-    end
-
-    local n = ins.name
-    if n == "NOP" then return "" end
-    if n == "LOADNIL" then return W(ins.a) .. " = nil" end
-    if n == "LOADB" then
-        if ins.c ~= 0 then
-            return W(ins.a) .. " = " .. (ins.b ~= 0 and "true" or "false") .. " ; goto " .. L(disasm.jump_target(ins))
-        end
-        return W(ins.a) .. " = " .. (ins.b ~= 0 and "true" or "false")
-    end
-    if n == "LOADN" then return W(ins.a) .. " = " .. ins.d end
-    if n == "LOADK" then return W(ins.a) .. " = " .. cstr(ins.d) end
-    if n == "LOADKX" then return W(ins.a) .. " = " .. cstr(ins.aux or 0) end
-    if n == "MOVE" then return W(ins.a) .. " = " .. R(ins.b) end
-    if n == "GETUPVAL" then return W(ins.a) .. " = upval" .. ins.b end
-    if n == "SETUPVAL" then return "upval" .. ins.b .. " = " .. R(ins.a) end
-    if n == "GETGLOBAL" then return W(ins.a) .. " = " .. cstr(ins.aux or 0) end
-    if n == "SETGLOBAL" then return cstr(ins.aux or 0) .. " = " .. R(ins.a) end
-    if n == "GETIMPORT" then return W(ins.a) .. " = " .. cstr(ins.d) end
-    if n == "GETTABLE" then return W(ins.a) .. " = " .. R(ins.b) .. "[" .. R(ins.c) .. "]" end
-    if n == "SETTABLE" then return R(ins.b) .. "[" .. R(ins.c) .. "] = " .. R(ins.a) end
-    if n == "GETTABLEKS" then
-        local c = proto and proto.constants and proto.constants[(ins.aux or 0) + 1]
-        local kn = c and c.value
-        if type(kn) == "string" and kn:match("^[%a_][%w_]*$") then
-            return W(ins.a) .. " = " .. R(ins.b) .. "." .. kn
-        end
-        return W(ins.a) .. " = " .. R(ins.b) .. "[" .. cstr(ins.aux or 0) .. "]"
-    end
-    if n == "SETTABLEKS" then
-        local c = proto and proto.constants and proto.constants[(ins.aux or 0) + 1]
-        local kn = c and c.value
-        if type(kn) == "string" and kn:match("^[%a_][%w_]*$") then
-            return R(ins.b) .. "." .. kn .. " = " .. R(ins.a)
-        end
-        return R(ins.b) .. "[" .. cstr(ins.aux or 0) .. "] = " .. R(ins.a)
-    end
-    if n == "GETTABLEN" then return W(ins.a) .. " = " .. R(ins.b) .. "[" .. (ins.c + 1) .. "]" end
-    if n == "SETTABLEN" then return R(ins.b) .. "[" .. (ins.c + 1) .. "] = " .. R(ins.a) end
-    if n == "NEWTABLE" then return W(ins.a) .. " = {}" end
-    if n == "DUPTABLE" then return W(ins.a) .. " = {dup K" .. ins.d .. "}" end
-    if n == "SETLIST" then return R(ins.a) .. "[..] = {..}" end
-    if n == "NEWCLOSURE" then return W(ins.a) .. " = closure(P" .. ins.d .. ")" end
-    if n == "DUPCLOSURE" then return W(ins.a) .. " = closure(K" .. ins.d .. ")" end
-    if n == "CAPTURE" then return "capture " .. ins.a .. " " .. R(ins.b) end
-    if n == "NAMECALL" then
-        local c = proto and proto.constants and proto.constants[(ins.aux or 0) + 1]
-        local kn = c and c.value or "?"
-        return W(ins.a) .. " = " .. R(ins.b) .. ":" .. tostring(kn) .. " [pending call]"
-    end
-    if n == "CALL" or n == "CALLFB" then
-        local nargs = ins.b - 1
-        local nres = ins.c - 1
-        local args = {}
-        for i = 1, nargs do args[#args + 1] = R(ins.a + i) end
-        local res
-        if nres == 1 then
-            res = W(ins.a) .. " = "
-        elseif nres == 0 then
-            res = ""
-        else
-            local parts = {}
-            for i = 0, nres - 1 do parts[#parts + 1] = W(ins.a + i) end
-            res = table.concat(parts, ", ") .. " = "
-        end
-        return res .. "call(" .. R(ins.a) .. (#args > 0 and (", " .. table.concat(args, ", ")) or "") .. ")"
-    end
-    if n == "RETURN" then
-        local nres = ins.b - 1
-        if nres <= 0 then return "return" end
-        local vals = {}
-        for i = 0, nres - 1 do vals[#vals + 1] = R(ins.a + i) end
-        return "return " .. table.concat(vals, ", ")
-    end
-    if n == "JUMP" then return "goto " .. L(disasm.jump_target(ins)) end
-    if n == "JUMPBACK" then return "back " .. L(disasm.jump_target(ins)) end
-    if n == "JUMPX" then return "gotoX " .. L(disasm.jump_target(ins)) end
-    if n == "JUMPIF" then return "if " .. R(ins.a) .. " then goto " .. L(disasm.jump_target(ins)) end
-    if n == "JUMPIFNOT" then return "if not " .. R(ins.a) .. " then goto " .. L(disasm.jump_target(ins)) end
-    if n == "JUMPIFEQ" then return "if " .. R(ins.a) .. " == " .. R(ins.aux or 0) .. " then goto " .. L(disasm.jump_target(ins)) end
-    if n == "JUMPIFNOTEQ" then return "if " .. R(ins.a) .. " ~= " .. R(ins.aux or 0) .. " then goto " .. L(disasm.jump_target(ins)) end
-    if n == "JUMPIFLE" then return "if " .. R(ins.a) .. " <= " .. R(ins.aux or 0) .. " then goto " .. L(disasm.jump_target(ins)) end
-    if n == "JUMPIFLT" then return "if " .. R(ins.a) .. " < " .. R(ins.aux or 0) .. " then goto " .. L(disasm.jump_target(ins)) end
-    if n == "JUMPIFNOTLE" then return "if " .. R(ins.a) .. " > " .. R(ins.aux or 0) .. " then goto " .. L(disasm.jump_target(ins)) end
-    if n == "JUMPIFNOTLT" then return "if " .. R(ins.a) .. " >= " .. R(ins.aux or 0) .. " then goto " .. L(disasm.jump_target(ins)) end
-    if n == "JUMPXEQKNIL" then
-        local nf = (ins.aux or 0) >= 0x80000000
-        return "if " .. R(ins.a) .. " " .. (nf and "~=" or "==") .. " nil then goto " .. L(disasm.jump_target(ins))
-    end
-    if n == "JUMPXEQKB" then
-        local v = (ins.aux or 0) % 2
-        return "if " .. R(ins.a) .. " == " .. (v == 1 and "true" or "false") .. " then goto " .. L(disasm.jump_target(ins))
-    end
-    if n == "JUMPXEQKN" or n == "JUMPXEQKS" then
-        local k = (ins.aux or 0) % 0x1000000
-        return "if " .. R(ins.a) .. " == " .. cstr(k) .. " then goto " .. L(disasm.jump_target(ins))
-    end
-    if n == "ADD" then return W(ins.a) .. " = " .. R(ins.b) .. " + " .. R(ins.c) end
-    if n == "SUB" then return W(ins.a) .. " = " .. R(ins.b) .. " - " .. R(ins.c) end
-    if n == "MUL" then return W(ins.a) .. " = " .. R(ins.b) .. " * " .. R(ins.c) end
-    if n == "DIV" then return W(ins.a) .. " = " .. R(ins.b) .. " / " .. R(ins.c) end
-    if n == "IDIV" then return W(ins.a) .. " = " .. R(ins.b) .. " // " .. R(ins.c) end
-    if n == "MOD" then return W(ins.a) .. " = " .. R(ins.b) .. " % " .. R(ins.c) end
-    if n == "POW" then return W(ins.a) .. " = " .. R(ins.b) .. " ^ " .. R(ins.c) end
-    if n == "ADDK" then return W(ins.a) .. " = " .. R(ins.b) .. " + " .. cstr(ins.c) end
-    if n == "SUBK" then return W(ins.a) .. " = " .. R(ins.b) .. " - " .. cstr(ins.c) end
-    if n == "MULK" then return W(ins.a) .. " = " .. R(ins.b) .. " * " .. cstr(ins.c) end
-    if n == "DIVK" then return W(ins.a) .. " = " .. R(ins.b) .. " / " .. cstr(ins.c) end
-    if n == "MODK" then return W(ins.a) .. " = " .. R(ins.b) .. " % " .. cstr(ins.c) end
-    if n == "POWK" then return W(ins.a) .. " = " .. R(ins.b) .. " ^ " .. cstr(ins.c) end
-    if n == "SUBRK" then return W(ins.a) .. " = " .. cstr(ins.b) .. " - " .. R(ins.c) end
-    if n == "DIVRK" then return W(ins.a) .. " = " .. cstr(ins.b) .. " / " .. R(ins.c) end
-    if n == "AND" then return W(ins.a) .. " = " .. R(ins.b) .. " and " .. R(ins.c) end
-    if n == "OR" then return W(ins.a) .. " = " .. R(ins.b) .. " or " .. R(ins.c) end
-    if n == "ANDK" then return W(ins.a) .. " = " .. R(ins.b) .. " and " .. cstr(ins.c) end
-    if n == "ORK" then return W(ins.a) .. " = " .. R(ins.b) .. " or " .. cstr(ins.c) end
-    if n == "CONCAT" then
-        local parts = {}
-        for i = ins.b, ins.c do parts[#parts + 1] = R(i) end
-        return W(ins.a) .. " = " .. table.concat(parts, " .. ")
-    end
-    if n == "NOT" then return W(ins.a) .. " = not " .. R(ins.b) end
-    if n == "MINUS" then return W(ins.a) .. " = -" .. R(ins.b) end
-    if n == "LENGTH" then return W(ins.a) .. " = #" .. R(ins.b) end
-    if n == "FORNPREP" then return "for prep -> " .. L(disasm.jump_target(ins)) end
-    if n == "FORNLOOP" then return "for loop -> " .. L(disasm.jump_target(ins)) end
-    if n == "FORGPREP" then return "forgen prep -> " .. L(disasm.jump_target(ins)) end
-    if n == "FORGLOOP" then
-        local cnt = (ins.aux or 0) % 256
-        return "forgen loop -> " .. L(disasm.jump_target(ins)) .. " vars=" .. cnt
-    end
-    if n == "GETVARARGS" then return W(ins.a) .. " = ..." end
-    if n == "PREPVARARGS" then return "prep varargs " .. ins.a end
-
-    return string.format("%s A=%d B=%d C=%d D=%d", n, ins.a, ins.b, ins.c, ins.d)
-end
-
-local function is_all_dead(ins, ssa_data)
-    if not ssa_data then return false end
-    if ins.name ~= "LOADNIL" and ins.name ~= "LOADN" and ins.name ~= "LOADK" and ins.name ~= "LOADKX"
-        and ins.name ~= "LOADB" and ins.name ~= "MOVE" and ins.name ~= "GETGLOBAL"
-        and ins.name ~= "GETUPVAL" and ins.name ~= "GETIMPORT" and ins.name ~= "NEWTABLE"
-        and ins.name ~= "GETTABLE" and ins.name ~= "GETTABLEKS" and ins.name ~= "GETTABLEN" then
-        return false
-    end
-    local writes = ssa_data.write_at[ins.word_idx]
-    if not writes or next(writes) == nil then return false end
-    for _, vid in pairs(writes) do
-        local v = ssa_data.versions[vid]
-        if not v or v.kind ~= "dead" then return false end
-    end
-    return true
-end
-
-local function is_inlined_call(ins, ssa_data, expr_db)
-    if not ssa_data or not expr_db then return false end
-    if ins.name ~= "CALL" and ins.name ~= "CALLFB" then return false end
-    local nres = ins.c - 1
-    if nres ~= 1 then return false end
-    local writes = ssa_data.write_at[ins.word_idx]
-    if not writes then return false end
-    local v = writes[ins.a]
-    if not v then return false end
-    return expr_db.inlineable and expr_db.inlineable[v]
-end
-
-local function make_edit_row(ins, current_value, proto, labels, indent, on_change, ssa_data, expr_db)
-    local row = Instance.new("Frame")
-    row.Size = UDim2.new(1, 0, 0, 22)
-    row.BackgroundTransparency = 1
-    row.Parent = bpRightScroll
-
-    local lbl = Instance.new("TextLabel")
-    lbl.Size = UDim2.new(1, -90, 1, 0)
-    lbl.BackgroundTransparency = 1
-    lbl.Text = string.rep("  ", indent) .. string.format("%06X  %s",
-        ins.byte_offset, fmt_expr(ins, ssa_data, expr_db, proto, labels))
-    local col = C.txt
-    if ins.name == "LOADN" or ins.name == "LOADK" then
-        col = C.warn
-    elseif ins.name == "LOADB" then
-        col = C.accent
-    elseif ins.name:find("JUMP") then
-        col = C.dim
-    elseif ins.name == "RETURN" then
-        col = C.ok
-    end
-    lbl.TextColor3 = col
-    lbl.Font = Enum.Font.Code
-    lbl.TextSize = 12
-    lbl.TextXAlignment = Enum.TextXAlignment.Left
-    lbl.Parent = row
-
-    local tb = Instance.new("TextBox")
-    tb.Size = UDim2.new(0, 80, 1, -2)
-    tb.Position = UDim2.new(1, -84, 0, 1)
-    tb.BackgroundColor3 = C.bg
-    tb.BorderSizePixel = 1
-    tb.BorderColor3 = C.border
-    tb.Text = tostring(current_value)
-    tb.TextColor3 = C.ok
-    tb.Font = Enum.Font.Code
-    tb.TextSize = 12
-    tb.ClearTextOnFocus = false
-    tb.Parent = row
-
-    tb.FocusLost:Connect(function()
-        local v = tonumber(tb.Text)
-        if not v then
-            tb.Text = tostring(current_value)
-            console.log("bad number", C.err)
-            return
-        end
-        on_change(v)
-    end)
-
-    attach_tap(row, ins.byte_offset)
-    table.insert(dis_lines, {f = row, byte_offset = ins.byte_offset, ins = ins})
-end
-
-local function make_read_row(ins, proto, labels, indent, ssa_data, expr_db)
-    local row = Instance.new("Frame")
-    row.Size = UDim2.new(1, 0, 0, 18)
-    row.BackgroundTransparency = 1
-    row.Parent = bpRightScroll
-
-    local lbl = Instance.new("TextLabel")
-    lbl.Size = UDim2.new(1, 0, 1, 0)
-    lbl.BackgroundTransparency = 1
-    lbl.Text = string.rep("  ", indent) .. string.format("%06X  %s",
-        ins.byte_offset, fmt_expr(ins, ssa_data, expr_db, proto, labels))
-    local col = C.txt
-    if ins.name == "LOADN" or ins.name == "LOADK" then
-        col = C.warn
-    elseif ins.name == "LOADB" then
-        col = C.accent
-    elseif ins.name:find("JUMP") then
-        col = C.dim
-    elseif ins.name == "RETURN" then
-        col = C.ok
-    end
-    lbl.TextColor3 = col
-    lbl.Font = Enum.Font.Code
-    lbl.TextSize = 12
-    lbl.TextXAlignment = Enum.TextXAlignment.Left
-    lbl.Parent = row
-
-    attach_tap(row, ins.byte_offset)
-    table.insert(dis_lines, {f = row, byte_offset = ins.byte_offset, ins = ins})
-end
-
-local function make_hidden_row()
-    local row = Instance.new("Frame")
-    row.Size = UDim2.new(1, 0, 0, 4)
-    row.BackgroundTransparency = 1
-    row.Parent = bpRightScroll
-end
-
-local function make_label_row(text, byte_offset, indent_level)
-    local row = Instance.new("Frame")
-    row.Size = UDim2.new(1, 0, 0, 20)
-    row.BackgroundTransparency = 1
-    row.Parent = bpRightScroll
-
-    local lbl = Instance.new("TextLabel")
-    lbl.Size = UDim2.new(1, 0, 1, 0)
-    lbl.BackgroundTransparency = 1
-    lbl.Text = string.rep("  ", indent_level or 0) .. text .. ":"
-    lbl.TextColor3 = C.accent
-    lbl.Font = Enum.Font.Code
-    lbl.TextSize = 12
-    lbl.TextXAlignment = Enum.TextXAlignment.Left
-    lbl.Parent = row
-end
-
-local function make_end_row(text, indent_level)
-    local row = Instance.new("Frame")
-    row.Size = UDim2.new(1, 0, 0, 18)
-    row.BackgroundTransparency = 1
-    row.Parent = bpRightScroll
-
-    local lbl = Instance.new("TextLabel")
-    lbl.Size = UDim2.new(1, 0, 1, 0)
-    lbl.BackgroundTransparency = 1
-    lbl.Text = string.rep("  ", indent_level or 0) .. "end: " .. text
-    lbl.TextColor3 = C.dim
-    lbl.Font = Enum.Font.Code
-    lbl.TextSize = 12
-    lbl.TextXAlignment = Enum.TextXAlignment.Left
-    lbl.Parent = row
-end
-
-local function safe_cfgs(instrs)
-    if cfgs and cfgs.analyze then
-        local ok, r = pcall(cfgs.analyze, instrs)
-        if ok and type(r) == "table" then return r end
-    end
-    return { labels = {}, ends = {}, indents = {} }
-end
-
-local function safe_ssa(instrs, proto)
-    if not ssa or not ssa.build then return nil end
-    local ok, r = pcall(ssa.build, instrs, proto)
-    if ok and type(r) == "table" then return r end
-    if not ssa_error_reported then
-        ssa_error_reported = true
-        if console and console.log then
-            console.log("[ssa] build failed: " .. tostring(r), C.err)
-        end
-    end
-    return nil
-end
-
-local function safe_expr(ssa_data, proto, instrs)
-    if not expr or not expr.build or not ssa_data then return nil end
-    local ok, r = pcall(expr.build, ssa_data, proto, instrs)
-    if ok and type(r) == "table" then return r end
-    if not expr_error_reported then
-        expr_error_reported = true
-        if console and console.log then
-            console.log("[expr] build failed: " .. tostring(r), C.err)
-        end
-    end
-    return nil
-end
-
-local function render_dis()
-    clear_dis()
-    local st = patch and patch.state
-    if not st or not st.instrs or not st.parsed then
-        local e = Instance.new("TextLabel")
-        e.Size = UDim2.new(1, 0, 0, 18)
-        e.BackgroundTransparency = 1
-        e.Text = "  no data"
-        e.TextColor3 = C.dim
-        e.Font = Enum.Font.Code
-        e.TextSize = 12
-        e.Parent = bpRightScroll
-        return
-    end
-
-    local proto = st.parsed.protos[st.proto_idx]
-    local analysis = safe_cfgs(st.instrs)
-    local labels = analysis.labels or {}
-    local ends = analysis.ends or {}
-    local indents = analysis.indents or {}
-
-    local ssa_data = safe_ssa(st.instrs, proto)
-    local expr_db = safe_expr(ssa_data, proto, st.instrs)
-
-    for _, ins in ipairs(st.instrs) do
-        local pc = ins.word_idx
-        local indent = indents[pc] or 0
-
-        if is_all_dead(ins, ssa_data) then
-            -- пропускаем мёртвую строку, оставляем тонкую пустую полоску для контекста
-            make_hidden_row()
-        else
-            if ends[pc] then
-                for _, txt in ipairs(ends[pc]) do
-                    make_end_row(txt, indent)
-                end
-            end
-
-            if labels[pc] then
-                make_label_row(labels[pc], ins.byte_offset, indent)
-            end
-
-            if ins.name == "LOADN" then
-                make_edit_row(ins, ins.d, proto, labels, indent, function(v)
-                    patch.apply_edit_loadn(ins, v)
-                end, ssa_data, expr_db)
-            elseif ins.name == "LOADB" then
-                make_edit_row(ins, ins.b, proto, labels, indent, function(v)
-                    patch.apply_edit_loadb(ins, v ~= 0)
-                end, ssa_data, expr_db)
-            elseif ins.name == "LOADK" then
-                local c = proto.constants[ins.d + 1]
-                if c and c.kind == 2 and type(c.value) == "number" then
-                    make_edit_row(ins, c.value, proto, labels, indent, function(v)
-                        patch.apply_edit_loadk(ins, v)
-                    end, ssa_data, expr_db)
-                else
-                    make_read_row(ins, proto, labels, indent, ssa_data, expr_db)
-                end
-            elseif is_inlined_call(ins, ssa_data, expr_db) then
-                make_hidden_row()
-            else
-                make_read_row(ins, proto, labels, indent, ssa_data, expr_db)
-            end
-        end
-    end
-
-    if selected_byte >= 0 then
-        for _, l in ipairs(dis_lines) do
-            if l.byte_offset == selected_byte then
-                l.f.BackgroundTransparency = 0.85
-                l.f.BackgroundColor3 = C.accent
-                break
-            end
-        end
-    end
-end
-
-local function update_save_state()
-    local st = patch and patch.state
-    if not st then return end
-    if st.dirty then
-        bpApply.BackgroundColor3 = Color3.fromRGB(40, 95, 55)
-        bpApply.BorderColor3 = Color3.fromRGB(120, 200, 120)
-        bpApply.TextColor3 = Color3.fromRGB(230, 255, 230)
-    else
-        bpApply.BackgroundColor3 = C.input
-        bpApply.BorderColor3 = C.border
-        bpApply.TextColor3 = C.dim
-    end
-
-    local parts = {}
-    parts[#parts + 1] = "BYTECODE"
-    if st.script then parts[#parts + 1] = st.script.Name end
-    if st.parsed then
-        parts[#parts + 1] = "proto " .. st.proto_idx .. "/" .. #st.parsed.protos
-        parts[#parts + 1] = (st.parsed.scheme or "?")
-    end
-    if st.dirty then parts[#parts + 1] = "modified" end
-    bpTitle.Text = "  " .. table.concat(parts, "   ·   ")
-end
-
-function M.render_all()
-    render_hex()
-    render_dis()
-    update_save_state()
-end
-
 function M.start()
     ensure_sg()
 
+    local PANEL_W = 900
+    local PANEL_H = 520
+    local HEADER_H = 32
+    local FOOTER_H = 40
+    local BODY_Y = HEADER_H + 2
+    local BODY_H = PANEL_H - HEADER_H - FOOTER_H - 4
+
     bp = Instance.new("Frame")
-    bp.Size = UDim2.new(0, 800, 0, 460)
-    bp.Position = UDim2.new(0.5, -400, 0.5, -230)
+    bp.Size = UDim2.new(0, PANEL_W, 0, PANEL_H)
+    bp.Position = UDim2.new(0.5, -PANEL_W / 2, 0.5, -PANEL_H / 2)
     bp.BackgroundColor3 = C.bg
     bp.BorderSizePixel = 1
     bp.BorderColor3 = C.border
     bp.Visible = false
     bp.Parent = p_sg
 
-    local BODY_Y = 26
-    local FOOT_H = 36
+    --========================
+    -- HEADER
+    --========================
+    local header = Instance.new("Frame")
+    header.Size = UDim2.new(1, 0, 0, HEADER_H)
+    header.Position = UDim2.new(0, 0, 0, 0)
+    header.BackgroundColor3 = C.bar
+    header.BorderSizePixel = 0
+    header.Parent = bp
 
-    bpHead = Instance.new("Frame")
-    bpHead.Size = UDim2.new(1, 0, 0, BODY_Y)
-    bpHead.Position = UDim2.new(0, 0, 0, 0)
-    bpHead.BackgroundColor3 = C.bar
-    bpHead.BorderSizePixel = 0
-    bpHead.Parent = bp
+    local header_sep = Instance.new("Frame")
+    header_sep.Size = UDim2.new(1, 0, 0, 1)
+    header_sep.Position = UDim2.new(0, 0, 1, -1)
+    header_sep.BackgroundColor3 = C.border
+    header_sep.BorderSizePixel = 0
+    header_sep.Parent = header
 
-    local headSep = Instance.new("Frame")
-    headSep.Size = UDim2.new(1, 0, 0, 1)
-    headSep.Position = UDim2.new(0, 0, 1, -1)
-    headSep.BackgroundColor3 = C.border
-    headSep.BorderSizePixel = 0
-    headSep.Parent = bpHead
+    -- Badge (SVG-like "signal bars" glyph)
+    local badge = Instance.new("Frame")
+    badge.Size = UDim2.new(0, 22, 0, 22)
+    badge.Position = UDim2.new(0, 8, 0.5, -11)
+    badge.BackgroundColor3 = C.input
+    badge.BorderSizePixel = 1
+    badge.BorderColor3 = C.border
+    badge.Parent = header
 
-    local dot = Instance.new("Frame")
-    dot.Size = UDim2.new(0, 8, 0, 8)
-    dot.Position = UDim2.new(0, 10, 0.5, -4)
-    dot.BackgroundColor3 = C.accent
-    dot.BorderSizePixel = 0
-    dot.Parent = bpHead
+    local bar_specs = {
+        {x = 5, h = 12, y = -6},
+        {x = 10, h = 8, y = -4},
+        {x = 15, h = 4, y = -2},
+    }
+    for _, s in ipairs(bar_specs) do
+        local bar = Instance.new("Frame")
+        bar.Size = UDim2.new(0, 2, 0, s.h)
+        bar.Position = UDim2.new(0, s.x, 0.5, s.y)
+        bar.BackgroundColor3 = C.accent
+        bar.BorderSizePixel = 0
+        bar.Parent = badge
+    end
 
-    bpTitle = Instance.new("TextLabel")
-    bpTitle.Size = UDim2.new(1, -30, 1, 0)
-    bpTitle.Position = UDim2.new(0, 24, 0, 0)
-    bpTitle.BackgroundTransparency = 1
-    bpTitle.Text = "BYTECODE"
-    bpTitle.TextColor3 = C.accent
-    bpTitle.Font = Enum.Font.Code
-    bpTitle.TextSize = 12
-    bpTitle.TextXAlignment = Enum.TextXAlignment.Left
-    bpTitle.Parent = bpHead
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(0, 220, 1, 0)
+    title.Position = UDim2.new(0, 38, 0, 0)
+    title.BackgroundTransparency = 1
+    title.Text = "BYTECODE EDITOR"
+    title.TextColor3 = C.txt
+    title.Font = Enum.Font.Code
+    title.TextSize = 12
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Parent = header
 
-    begin_drag(bpHead)
+    header_info = Instance.new("TextLabel")
+    header_info.Size = UDim2.new(1, -320, 1, 0)
+    header_info.Position = UDim2.new(0, 200, 0, 0)
+    header_info.BackgroundTransparency = 1
+    header_info.Text = ""
+    header_info.TextColor3 = C.dim
+    header_info.Font = Enum.Font.Code
+    header_info.TextSize = 11
+    header_info.TextXAlignment = Enum.TextXAlignment.Left
+    header_info.Parent = header
 
-    local inner_w = 800 - 8
+    status_dot = Instance.new("Frame")
+    status_dot.Size = UDim2.new(0, 8, 0, 8)
+    status_dot.Position = UDim2.new(1, -20, 0.5, -4)
+    status_dot.BackgroundColor3 = C.dim
+    status_dot.BorderSizePixel = 0
+    status_dot.Parent = header
+    local dot_corner = Instance.new("UICorner")
+    dot_corner.CornerRadius = UDim.new(1, 0)
+    dot_corner.Parent = status_dot
 
-    bpLeft = Instance.new("Frame")
-    bpLeft.Size = UDim2.new(0.5, -8, 1, -BODY_Y - FOOT_H - 4)
-    bpLeft.Position = UDim2.new(0, 4, 0, BODY_Y + 2)
-    bpLeft.BackgroundColor3 = C.input
-    bpLeft.BorderSizePixel = 1
-    bpLeft.BorderColor3 = C.border
-    bpLeft.ClipsDescendants = true
-    bpLeft.Parent = bp
+    drag_begin(header)
 
-    local bpLeftLbl = Instance.new("TextLabel")
-    bpLeftLbl.Size = UDim2.new(1, 0, 0, 18)
-    bpLeftLbl.BackgroundColor3 = C.bar
-    bpLeftLbl.BorderSizePixel = 0
-    bpLeftLbl.Text = "  HEX"
-    bpLeftLbl.TextColor3 = C.dim
-    bpLeftLbl.Font = Enum.Font.Code
-    bpLeftLbl.TextSize = 10
-    bpLeftLbl.TextXAlignment = Enum.TextXAlignment.Left
-    bpLeftLbl.Parent = bpLeft
+    --========================
+    -- LEFT PANE (HEX)
+    --========================
+    left_pane = Instance.new("Frame")
+    left_pane.Size = UDim2.new(0.5, -8, 0, BODY_H)
+    left_pane.Position = UDim2.new(0, 4, 0, BODY_Y)
+    left_pane.BackgroundColor3 = C.input
+    left_pane.BorderSizePixel = 1
+    left_pane.BorderColor3 = C.border
+    left_pane.ClipsDescendants = true
+    left_pane.Parent = bp
 
-    local leftSep = Instance.new("Frame")
-    leftSep.Size = UDim2.new(1, 0, 0, 1)
-    leftSep.Position = UDim2.new(0, 0, 1, -1)
-    leftSep.BackgroundColor3 = C.border
-    leftSep.BorderSizePixel = 0
-    leftSep.Parent = bpLeftLbl
+    local left_head = Instance.new("TextLabel")
+    left_head.Size = UDim2.new(1, 0, 0, 20)
+    left_head.BackgroundColor3 = C.bar
+    left_head.BorderSizePixel = 0
+    left_head.Text = "  HEX"
+    left_head.TextColor3 = C.dim
+    left_head.Font = Enum.Font.Code
+    left_head.TextSize = 10
+    left_head.TextXAlignment = Enum.TextXAlignment.Left
+    left_head.Parent = left_pane
 
-    bpLeftScroll = Instance.new("ScrollingFrame")
-    bpLeftScroll.Size = UDim2.new(1, 0, 1, -18)
-    bpLeftScroll.Position = UDim2.new(0, 0, 0, 18)
-    bpLeftScroll.BackgroundTransparency = 1
-    bpLeftScroll.BorderSizePixel = 0
-    bpLeftScroll.ScrollBarThickness = 3
-    bpLeftScroll.ScrollBarImageColor3 = C.border
-    bpLeftScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-    bpLeftScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-    bpLeftScroll.Parent = bpLeft
+    local left_sep = Instance.new("Frame")
+    left_sep.Size = UDim2.new(1, 0, 0, 1)
+    left_sep.Position = UDim2.new(0, 0, 0, 19)
+    left_sep.BackgroundColor3 = C.border
+    left_sep.BorderSizePixel = 0
+    left_sep.Parent = left_pane
 
-    local bpLLayout = Instance.new("UIListLayout")
-    bpLLayout.Padding = UDim.new(0, 0)
-    bpLLayout.SortOrder = Enum.SortOrder.LayoutOrder
-    bpLLayout.Parent = bpLeftScroll
+    left_scroll = Instance.new("ScrollingFrame")
+    left_scroll.Size = UDim2.new(1, 0, 1, -20)
+    left_scroll.Position = UDim2.new(0, 0, 0, 20)
+    left_scroll.BackgroundTransparency = 1
+    left_scroll.BorderSizePixel = 0
+    left_scroll.ScrollBarThickness = 3
+    left_scroll.ScrollBarImageColor3 = C.border
+    left_scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    left_scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    left_scroll.Parent = left_pane
 
-    local bpLPad = Instance.new("UIPadding")
-    bpLPad.PaddingLeft = UDim.new(0, 8)
-    bpLPad.PaddingTop = UDim.new(0, 4)
-    bpLPad.Parent = bpLeftScroll
+    local left_layout = Instance.new("UIListLayout")
+    left_layout.Padding = UDim.new(0, 0)
+    left_layout.SortOrder = Enum.SortOrder.LayoutOrder
+    left_layout.Parent = left_scroll
 
-    bpRight = Instance.new("Frame")
-    bpRight.Size = UDim2.new(0.5, -8, 1, -BODY_Y - FOOT_H - 4)
-    bpRight.Position = UDim2.new(0.5, 4, 0, BODY_Y + 2)
-    bpRight.BackgroundColor3 = C.input
-    bpRight.BorderSizePixel = 1
-    bpRight.BorderColor3 = C.border
-    bpRight.ClipsDescendants = true
-    bpRight.Parent = bp
+    local left_pad = Instance.new("UIPadding")
+    left_pad.PaddingLeft = UDim.new(0, 8)
+    left_pad.PaddingTop = UDim.new(0, 4)
+    left_pad.Parent = left_scroll
 
-    local bpRightLbl = Instance.new("TextLabel")
-    bpRightLbl.Size = UDim2.new(1, 0, 0, 18)
-    bpRightLbl.BackgroundColor3 = C.bar
-    bpRightLbl.BorderSizePixel = 0
-    bpRightLbl.Text = "  DISASM"
-    bpRightLbl.TextColor3 = C.dim
-    bpRightLbl.Font = Enum.Font.Code
-    bpRightLbl.TextSize = 10
-    bpRightLbl.TextXAlignment = Enum.TextXAlignment.Left
-    bpRightLbl.Parent = bpRight
+    --========================
+    -- RIGHT PANE (SOURCE)
+    --========================
+    right_pane = Instance.new("Frame")
+    right_pane.Size = UDim2.new(0.5, -8, 0, BODY_H)
+    right_pane.Position = UDim2.new(0.5, 4, 0, BODY_Y)
+    right_pane.BackgroundColor3 = C.input
+    right_pane.BorderSizePixel = 1
+    right_pane.BorderColor3 = C.border
+    right_pane.ClipsDescendants = true
+    right_pane.Parent = bp
 
-    local rightSep = Instance.new("Frame")
-    rightSep.Size = UDim2.new(1, 0, 0, 1)
-    rightSep.Position = UDim2.new(0, 0, 1, -1)
-    rightSep.BackgroundColor3 = C.border
-    rightSep.BorderSizePixel = 0
-    rightSep.Parent = bpRightLbl
+    local right_head = Instance.new("TextLabel")
+    right_head.Size = UDim2.new(1, 0, 0, 20)
+    right_head.BackgroundColor3 = C.bar
+    right_head.BorderSizePixel = 0
+    right_head.Text = "  SOURCE"
+    right_head.TextColor3 = C.dim
+    right_head.Font = Enum.Font.Code
+    right_head.TextSize = 10
+    right_head.TextXAlignment = Enum.TextXAlignment.Left
+    right_head.Parent = right_pane
 
-    bpRightScroll = Instance.new("ScrollingFrame")
-    bpRightScroll.Size = UDim2.new(1, 0, 1, -18)
-    bpRightScroll.Position = UDim2.new(0, 0, 0, 18)
-    bpRightScroll.BackgroundTransparency = 1
-    bpRightScroll.BorderSizePixel = 0
-    bpRightScroll.ScrollBarThickness = 3
-    bpRightScroll.ScrollBarImageColor3 = C.border
-    bpRightScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-    bpRightScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-    bpRightScroll.Parent = bpRight
+    local right_sep = Instance.new("Frame")
+    right_sep.Size = UDim2.new(1, 0, 0, 1)
+    right_sep.Position = UDim2.new(0, 0, 0, 19)
+    right_sep.BackgroundColor3 = C.border
+    right_sep.BorderSizePixel = 0
+    right_sep.Parent = right_pane
 
-    local bpRLayout = Instance.new("UIListLayout")
-    bpRLayout.Padding = UDim.new(0, 0)
-    bpRLayout.SortOrder = Enum.SortOrder.LayoutOrder
-    bpRLayout.Parent = bpRightScroll
+    -- View frame
+    right_view_frame = Instance.new("Frame")
+    right_view_frame.Size = UDim2.new(1, 0, 1, -20)
+    right_view_frame.Position = UDim2.new(0, 0, 0, 20)
+    right_view_frame.BackgroundTransparency = 1
+    right_view_frame.BorderSizePixel = 0
+    right_view_frame.Parent = right_pane
 
-    local bpRPad = Instance.new("UIPadding")
-    bpRPad.PaddingLeft = UDim.new(0, 8)
-    bpRPad.PaddingTop = UDim.new(0, 4)
-    bpRPad.Parent = bpRightScroll
+    right_view_scroll = Instance.new("ScrollingFrame")
+    right_view_scroll.Size = UDim2.new(1, 0, 1, 0)
+    right_view_scroll.BackgroundTransparency = 1
+    right_view_scroll.BorderSizePixel = 0
+    right_view_scroll.ScrollBarThickness = 3
+    right_view_scroll.ScrollBarImageColor3 = C.border
+    right_view_scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    right_view_scroll.AutomaticCanvasSize = Enum.AutomaticSize.XY
+    right_view_scroll.ScrollingDirection = Enum.ScrollingDirection.XY
+    right_view_scroll.Parent = right_view_frame
 
-    bpFoot = Instance.new("Frame")
-    bpFoot.Size = UDim2.new(1, 0, 0, FOOT_H)
-    bpFoot.Position = UDim2.new(0, 0, 1, -FOOT_H)
-    bpFoot.BackgroundColor3 = C.bar
-    bpFoot.BorderSizePixel = 0
-    bpFoot.Parent = bp
+    right_view_content = Instance.new("TextLabel")
+    right_view_content.Size = UDim2.new(0, 0, 0, 0)
+    right_view_content.Position = UDim2.new(0, 8, 0, 4)
+    right_view_content.BackgroundTransparency = 1
+    right_view_content.RichText = true
+    right_view_content.Text = ""
+    right_view_content.TextColor3 = C.txt
+    right_view_content.TextXAlignment = Enum.TextXAlignment.Left
+    right_view_content.TextYAlignment = Enum.TextYAlignment.Top
+    right_view_content.Font = Enum.Font.Code
+    right_view_content.TextSize = 13
+    right_view_content.TextWrapped = false
+    right_view_content.AutomaticSize = Enum.AutomaticSize.XY
+    right_view_content.Parent = right_view_scroll
 
-    local footSep = Instance.new("Frame")
-    footSep.Size = UDim2.new(1, 0, 0, 1)
-    footSep.Position = UDim2.new(0, 0, 0, 0)
-    footSep.BackgroundColor3 = C.border
-    footSep.BorderSizePixel = 0
-    footSep.Parent = bpFoot
+    -- Edit frame
+    right_edit_frame = Instance.new("Frame")
+    right_edit_frame.Size = UDim2.new(1, 0, 1, -20)
+    right_edit_frame.Position = UDim2.new(0, 0, 0, 20)
+    right_edit_frame.BackgroundTransparency = 1
+    right_edit_frame.BorderSizePixel = 0
+    right_edit_frame.Visible = false
+    right_edit_frame.Parent = right_pane
 
-    bpExit = Instance.new("TextButton")
-    bpExit.Size = UDim2.new(0, 96, 0, 24)
-    bpExit.Position = UDim2.new(0, 8, 0.5, -12)
-    bpExit.BackgroundColor3 = C.input
-    bpExit.BorderSizePixel = 1
-    bpExit.BorderColor3 = C.border
-    bpExit.Text = "×  EXIT"
-    bpExit.TextColor3 = C.err
-    bpExit.Font = Enum.Font.Code
-    bpExit.TextSize = 11
-    bpExit.AutoButtonColor = false
-    bpExit.Parent = bpFoot
+    right_edit_scroll = Instance.new("ScrollingFrame")
+    right_edit_scroll.Size = UDim2.new(1, 0, 1, 0)
+    right_edit_scroll.BackgroundTransparency = 1
+    right_edit_scroll.BorderSizePixel = 0
+    right_edit_scroll.ScrollBarThickness = 3
+    right_edit_scroll.ScrollBarImageColor3 = C.border
+    right_edit_scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    right_edit_scroll.AutomaticCanvasSize = Enum.AutomaticSize.XY
+    right_edit_scroll.ScrollingDirection = Enum.ScrollingDirection.XY
+    right_edit_scroll.Parent = right_edit_frame
 
-    bpApply = Instance.new("TextButton")
-    bpApply.Size = UDim2.new(0, 96, 0, 24)
-    bpApply.Position = UDim2.new(1, -104, 0.5, -12)
-    bpApply.BackgroundColor3 = C.input
-    bpApply.BorderSizePixel = 1
-    bpApply.BorderColor3 = C.border
-    bpApply.Text = "✓  SAVE"
-    bpApply.TextColor3 = C.dim
-    bpApply.Font = Enum.Font.Code
-    bpApply.TextSize = 11
-    bpApply.AutoButtonColor = false
-    bpApply.Parent = bpFoot
+    right_edit_box = Instance.new("TextBox")
+    right_edit_box.Size = UDim2.new(0, 300, 0, 40)
+    right_edit_box.Position = UDim2.new(0, 8, 0, 4)
+    right_edit_box.BackgroundTransparency = 1
+    right_edit_box.Text = ""
+    right_edit_box.TextColor3 = C.txt
+    right_edit_box.PlaceholderText = ""
+    right_edit_box.PlaceholderColor3 = C.dim
+    right_edit_box.TextXAlignment = Enum.TextXAlignment.Left
+    right_edit_box.TextYAlignment = Enum.TextYAlignment.Top
+    right_edit_box.Font = Enum.Font.Code
+    right_edit_box.TextSize = 13
+    right_edit_box.TextWrapped = false
+    right_edit_box.MultiLine = true
+    right_edit_box.ClearTextOnFocus = false
+    right_edit_box.AutomaticSize = Enum.AutomaticSize.XY
+    right_edit_box.Parent = right_edit_scroll
 
-    bpExit.MouseButton1Click:Connect(function()
+    right_edit_box.TextChanged:Connect(function()
+        if loading_edit then return end
+        is_dirty = true
+        update_header()
+    end)
+
+    --========================
+    -- FOOTER
+    --========================
+    footer = Instance.new("Frame")
+    footer.Size = UDim2.new(1, 0, 0, FOOTER_H)
+    footer.Position = UDim2.new(0, 0, 1, -FOOTER_H)
+    footer.BackgroundColor3 = C.bar
+    footer.BorderSizePixel = 0
+    footer.Parent = bp
+
+    local foot_sep = Instance.new("Frame")
+    foot_sep.Size = UDim2.new(1, 0, 0, 1)
+    foot_sep.Position = UDim2.new(0, 0, 0, 0)
+    foot_sep.BackgroundColor3 = C.border
+    foot_sep.BorderSizePixel = 0
+    foot_sep.Parent = footer
+
+    btn_decompile = mk_button(footer, "DECOMPILE", 96, 8, 0, C.accent)
+    btn_edit = mk_button(footer, "EDIT", 70, 110, 0, C.txt)
+    btn_revert = mk_button(footer, "REVERT", 76, 186, 0, C.warn)
+
+    btn_exit = mk_button(footer, "EXIT", 60, PANEL_W - 140, 0, C.err)
+    btn_save = mk_button(footer, "SAVE", 72, PANEL_W - 76, 0, C.dim)
+
+    --========================
+    -- EVENTS
+    --========================
+    btn_decompile.MouseButton1Click:Connect(function()
+        if mode == "edit" then exit_edit_mode() end
+        cached_src = nil
+        cached_for_bytecode = nil
+        M.render_all()
+        console.log("re-decompiled via D1", C.accent)
+    end)
+
+    btn_edit.MouseButton1Click:Connect(function()
+        if mode == "view" then
+            enter_edit_mode()
+        else
+            exit_edit_mode()
+        end
+    end)
+
+    btn_revert.MouseButton1Click:Connect(revert_all)
+
+    btn_exit.MouseButton1Click:Connect(function()
         bp.Visible = false
     end)
 
-    bpApply.MouseButton1Click:Connect(function()
-        if patch and patch.do_apply then patch.do_apply() end
-    end)
+    btn_save.MouseButton1Click:Connect(do_save)
 end
 
 function M.show()
     if not bp then M.start() end
-    if not bp then
-        if console and console.log then
-            console.log("panel: failed to create", C.err)
-        end
-        return
-    end
-
     ensure_sg()
     if bp.Parent ~= p_sg then bp.Parent = p_sg end
-
-    if bp_first_show or not last_bp_pos then
-        bp.Position = UDim2.new(0.5, -400, 0.5, -230)
-        bp_first_show = false
-    else
-        bp.Position = last_bp_pos
-    end
-
     bp.Visible = true
-
-    -- сохраняем текущую позицию перед скрытием
-    bp.AncestryChanged:Connect(function()
-        if bp.Parent == nil then
-            last_bp_pos = bp.Position
-        end
-    end)
-
-    local ok, err = pcall(M.render_all)
-    if not ok and console and console.log then
-        console.log("panel render error: " .. tostring(err), C.err)
-    end
+    M.render_all()
 end
 
 function M.hide()
-    if bp then
-        last_bp_pos = bp.Position
-        bp.Visible = false
-    end
+    if bp then bp.Visible = false end
 end
 
 function M.init(bc)
     BC = bc
     console = bc.modules.console
     parser = bc.modules.parser
-    disasm = bc.modules.disasm
-    cfgs = bc.modules.cfgs
     patch = bc.modules.patch
-    names = bc.modules.names
-    varflow = bc.modules.varflow
-    ssa = bc.modules.ssa
-    expr = bc.modules.expr
+    decompile = bc.modules.decompile
     C = console.colors()
 end
 
