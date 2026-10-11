@@ -4,7 +4,7 @@ M.name = "decompile"
 local BC
 local parser, disasm, ssa, expr, cfgs
 
-local API_URL = "https://obfuscation-tvcs.onrender.com/"
+local API_URL = "https://obfuscation-tvcs.onrender.com/decompile"
 
 local function is_cond_jump(name)
     if name == "JUMPIF" or name == "JUMPIFNOT" then return true end
