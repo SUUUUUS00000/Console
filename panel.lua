@@ -47,6 +47,18 @@ u.InputEnded:Connect(function(i)
     end
 end)
 
+local function resolve_gui_root()
+    if console and console.gui_root then
+        local r = console.gui_root()
+        if r then return r end
+    end
+    if gethui then
+        local ok, r = pcall(gethui)
+        if ok and r then return r end
+    end
+    return game:GetService("CoreGui")
+end
+
 local function clear_hex()
     for _, v in ipairs(bpLeftScroll:GetChildren()) do
         if v:IsA("Frame") then v:Destroy() end
@@ -379,6 +391,8 @@ function M.render_all()
 end
 
 function M.start()
+    gui_root = resolve_gui_root()
+
     bp = Instance.new("Frame")
     bp.Size = UDim2.new(0, 780, 0, 440)
     bp.Position = UDim2.new(0, 40, 0, 60)
@@ -541,7 +555,14 @@ function M.start()
 end
 
 function M.show()
+    if not bp then
+        M.start()
+    end
     if bp then
+        gui_root = resolve_gui_root()
+        if bp.Parent ~= gui_root then
+            bp.Parent = gui_root
+        end
         bp.Visible = true
         M.render_all()
     end
@@ -561,7 +582,6 @@ function M.init(bc)
     names = bc.modules.names
     varflow = bc.modules.varflow
     C = console.colors()
-    gui_root = console.gui_root()
 end
 
 return M
