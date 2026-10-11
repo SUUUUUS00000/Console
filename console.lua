@@ -5,20 +5,24 @@ local BC
 local u = game:GetService("UserInputService")
 local t = game:GetService("TweenService")
 
+local function px(r, g, b)
+    return Color3.fromRGB(r, g, b)
+end
+
 local C = {
-    bg     = Color3.fromRGB(30, 30, 30),
-    bar    = Color3.fromRGB(42, 42, 42),
-    input  = Color3.fromRGB(22, 22, 22),
-    out    = Color3.fromRGB(18, 18, 18),
-    border = Color3.fromRGB(62, 62, 62),
-    txt    = Color3.fromRGB(215, 215, 215),
-    dim    = Color3.fromRGB(120, 120, 120),
-    hint   = Color3.fromRGB(85, 85, 85),
-    accent = Color3.fromRGB(120, 160, 220),
-    ok     = Color3.fromRGB(120, 200, 120),
-    err    = Color3.fromRGB(220, 110, 110),
-    warn   = Color3.fromRGB(220, 190, 110),
-    hex    = Color3.fromRGB(170, 170, 170),
+    bg     = px(24, 24, 28),
+    bar    = px(40, 40, 48),
+    input  = px(18, 18, 22),
+    out    = px(14, 14, 18),
+    border = px(56, 56, 66),
+    txt    = px(224, 224, 232),
+    dim    = px(138, 138, 152),
+    hint   = px(74, 74, 86),
+    accent = px(94, 164, 244),
+    ok     = px(88, 214, 122),
+    err    = px(240, 96, 96),
+    warn   = px(232, 184, 96),
+    hex    = px(170, 170, 180),
 }
 
 local MAX_LOG = 5000
@@ -134,17 +138,37 @@ function M.start(bc)
     sg.IgnoreGuiInset = true
     sg.Parent = gui_root
 
+    -- Внешняя пиксельная рамка
+    local root = Instance.new("Frame")
+    root.Size = UDim2.new(1, 0, 0, 200)
+    root.Position = UDim2.new(0, 0, 0, 0)
+    root.BackgroundTransparency = 1
+    root.Parent = sg
+
     main = Instance.new("Frame")
     main.Size = UDim2.new(1, 0, 0, 26)
     main.Position = UDim2.new(0, 0, 0, 0)
     main.BackgroundColor3 = C.bar
-    main.BorderSizePixel = 1
-    main.BorderColor3 = C.border
+    main.BorderSizePixel = 0
     main.Parent = sg
+
+    local main_top = Instance.new("Frame")
+    main_top.Size = UDim2.new(1, 0, 0, 1)
+    main_top.Position = UDim2.new(0, 0, 0, 0)
+    main_top.BackgroundColor3 = C.border
+    main_top.BorderSizePixel = 0
+    main_top.Parent = main
+
+    local main_bot = Instance.new("Frame")
+    main_bot.Size = UDim2.new(1, 0, 0, 1)
+    main_bot.Position = UDim2.new(0, 0, 1, -1)
+    main_bot.BackgroundColor3 = C.border
+    main_bot.BorderSizePixel = 0
+    main_bot.Parent = main
 
     inp = Instance.new("TextBox")
     inp.Size = UDim2.new(1, -40, 1, 0)
-    inp.Position = UDim2.new(0, 6, 0, 0)
+    inp.Position = UDim2.new(0, 8, 0, 0)
     inp.BackgroundTransparency = 1
     inp.Text = ""
     inp.PlaceholderText = "> command"
@@ -157,14 +181,21 @@ function M.start(bc)
     inp.Parent = main
 
     minBtn = Instance.new("TextButton")
-    minBtn.Size = UDim2.new(0, 26, 0, 26)
-    minBtn.Position = UDim2.new(1, -26, 0, 0)
+    minBtn.Size = UDim2.new(0, 26, 0, 24)
+    minBtn.Position = UDim2.new(1, -28, 0, 1)
     minBtn.BackgroundColor3 = C.input
-    minBtn.BorderSizePixel = 1
-    minBtn.BorderColor3 = C.border
+    minBtn.BorderSizePixel = 0
     minBtn.Text = ""
     minBtn.AutoButtonColor = false
     minBtn.Parent = main
+
+    local mb_border = Instance.new("Frame")
+    mb_border.Size = UDim2.new(1, 2, 1, 2)
+    mb_border.Position = UDim2.new(0, -1, 0, -1)
+    mb_border.BackgroundTransparency = 1
+    mb_border.BorderSizePixel = 1
+    mb_border.BorderColor3 = C.border
+    mb_border.Parent = minBtn
 
     hbar = Instance.new("Frame")
     hbar.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -194,10 +225,23 @@ function M.start(bc)
     hintBar.Size = UDim2.new(1, 0, 0, 20)
     hintBar.Position = UDim2.new(0, 0, 0, 0)
     hintBar.BackgroundColor3 = C.input
-    hintBar.BorderSizePixel = 1
-    hintBar.BorderColor3 = C.border
+    hintBar.BorderSizePixel = 0
     hintBar.ClipsDescendants = true
     hintBar.Parent = panel
+
+    local hb_top = Instance.new("Frame")
+    hb_top.Size = UDim2.new(1, 0, 0, 1)
+    hb_top.Position = UDim2.new(0, 0, 0, 0)
+    hb_top.BackgroundColor3 = C.border
+    hb_top.BorderSizePixel = 0
+    hb_top.Parent = hintBar
+
+    local hb_bot = Instance.new("Frame")
+    hb_bot.Size = UDim2.new(1, 0, 0, 1)
+    hb_bot.Position = UDim2.new(0, 0, 1, -1)
+    hb_bot.BackgroundColor3 = C.border
+    hb_bot.BorderSizePixel = 0
+    hb_bot.Parent = hintBar
 
     hl = Instance.new("TextLabel")
     hl.Size = UDim2.new(1, -12, 1, 0)
@@ -214,11 +258,16 @@ function M.start(bc)
     out.Size = UDim2.new(1, 0, 1, -20)
     out.Position = UDim2.new(0, 0, 0, 20)
     out.BackgroundColor3 = C.out
-    out.BackgroundTransparency = 0.1
-    out.BorderSizePixel = 1
-    out.BorderColor3 = C.border
+    out.BorderSizePixel = 0
     out.ClipsDescendants = true
     out.Parent = panel
+
+    local out_bot = Instance.new("Frame")
+    out_bot.Size = UDim2.new(1, 0, 0, 1)
+    out_bot.Position = UDim2.new(0, 0, 1, -1)
+    out_bot.BackgroundColor3 = C.border
+    out_bot.BorderSizePixel = 0
+    out_bot.Parent = out
 
     sb = Instance.new("ScrollingFrame")
     sb.Size = UDim2.new(1, 0, 1, 0)
