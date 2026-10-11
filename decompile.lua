@@ -4,6 +4,8 @@ M.name = "decompile"
 local BC
 local parser, disasm, ssa, expr, cfgs
 
+local API_URL = "https://obfuscation-tvcs.onrender.com/"
+
 local function is_cond_jump(name)
     if name == "JUMPIF" or name == "JUMPIFNOT" then return true end
     if name == "JUMPIFEQ" or name == "JUMPIFNOTEQ" then return true end
@@ -12,10 +14,6 @@ local function is_cond_jump(name)
     if name == "JUMPXEQKNIL" or name == "JUMPXEQKB" then return true end
     if name == "JUMPXEQKN" or name == "JUMPXEQKS" then return true end
     return false
-end
-
-local function is_uncond_jump(name)
-    return name == "JUMP" or name == "JUMPBACK" or name == "JUMPX"
 end
 
 local LUA_KEYWORDS = {
@@ -66,7 +64,6 @@ local function cstr(proto, i)
     return "nil"
 end
 
--- Получить строковое имя члена таблицы, если ключ — валидный идентификатор
 local function member_name(proto, k_idx)
     if not proto or not proto.constants then return nil end
     local c = proto.constants[(k_idx or 0) + 1]
@@ -77,7 +74,10 @@ local function member_name(proto, k_idx)
     return nil
 end
 
--- Функция декодирования одного прототипа в список строк исходника
+--=====================================================================
+-- ЛОКАЛЬНЫЙ ДЕКОМПИЛЯТОР (fallback)
+--=====================================================================
+
 local function decompile_proto(proto_idx, parsed, indent_base, wrap_as_function)
     local proto = parsed.protos[proto_idx]
     if not proto then return {"-- error: proto " .. proto_idx} end
@@ -127,23 +127,17 @@ local function decompile_proto(proto_idx, parsed, indent_base, wrap_as_function)
         return ssa_data.name_of[v] or ("R" .. reg)
     end
 
-    -- Комбинированное условие из цепочки JUMPIF/JUMPIFNOT, ведущих в один target
     local function build_chain_cond(start_ins)
         local target = disasm.jump_target(start_ins)
         if target < 0 then return nil end
         local parts = {}
         local last_op = nil
-        -- сканируем последовательные cond-jumps, ведущие к тому же target
-        local i = 1
         local start_idx = nil
         for idx, ins in ipairs(instrs) do
-            if ins.word_idx == start_ins.word_idx then
-                start_idx = idx
-                break
-            end
+            if ins.word_idx == start_ins.word_idx then start_idx = idx; break end
         end
         if not start_idx then return nil end
-        i = start_idx
+        local i = start_idx
         while i <= #instrs do
             local ins = instrs[i]
             if not is_cond_jump(ins.name) then break end
@@ -156,26 +150,23 @@ local function decompile_proto(proto_idx, parsed, indent_base, wrap_as_function)
                 this_op = "and"
             end
             local cnd = ""
-            local function rcode(reg)
-                return rc(ins.word_idx, reg)
-            end
-            if ins.name == "JUMPIF" then cnd = rcode(ins.a)
-            elseif ins.name == "JUMPIFNOT" then cnd = "not " .. rcode(ins.a)
-            elseif ins.name == "JUMPIFEQ" then cnd = rcode(ins.a) .. " == " .. rcode(ins.aux or 0)
-            elseif ins.name == "JUMPIFNOTEQ" then cnd = rcode(ins.a) .. " ~= " .. rcode(ins.aux or 0)
-            elseif ins.name == "JUMPIFLE" then cnd = rcode(ins.a) .. " <= " .. rcode(ins.aux or 0)
-            elseif ins.name == "JUMPIFLT" then cnd = rcode(ins.a) .. " < " .. rcode(ins.aux or 0)
-            elseif ins.name == "JUMPIFNOTLE" then cnd = rcode(ins.a) .. " > " .. rcode(ins.aux or 0)
-            elseif ins.name == "JUMPIFNOTLT" then cnd = rcode(ins.a) .. " >= " .. rcode(ins.aux or 0)
+            if ins.name == "JUMPIF" then cnd = rc(ins.word_idx, ins.a)
+            elseif ins.name == "JUMPIFNOT" then cnd = "not " .. rc(ins.word_idx, ins.a)
+            elseif ins.name == "JUMPIFEQ" then cnd = rc(ins.word_idx, ins.a) .. " == " .. rc(ins.word_idx, ins.aux or 0)
+            elseif ins.name == "JUMPIFNOTEQ" then cnd = rc(ins.word_idx, ins.a) .. " ~= " .. rc(ins.word_idx, ins.aux or 0)
+            elseif ins.name == "JUMPIFLE" then cnd = rc(ins.word_idx, ins.a) .. " <= " .. rc(ins.word_idx, ins.aux or 0)
+            elseif ins.name == "JUMPIFLT" then cnd = rc(ins.word_idx, ins.a) .. " < " .. rc(ins.word_idx, ins.aux or 0)
+            elseif ins.name == "JUMPIFNOTLE" then cnd = rc(ins.word_idx, ins.a) .. " > " .. rc(ins.word_idx, ins.aux or 0)
+            elseif ins.name == "JUMPIFNOTLT" then cnd = rc(ins.word_idx, ins.a) .. " >= " .. rc(ins.word_idx, ins.aux or 0)
             elseif ins.name == "JUMPXEQKNIL" then
                 local nf = (ins.aux or 0) >= 0x80000000
-                cnd = rcode(ins.a) .. (nf and " ~= nil" or " == nil")
+                cnd = rc(ins.word_idx, ins.a) .. (nf and " ~= nil" or " == nil")
             elseif ins.name == "JUMPXEQKB" then
                 local v = (ins.aux or 0) % 2
-                cnd = rcode(ins.a) .. " == " .. (v == 1 and "true" or "false")
+                cnd = rc(ins.word_idx, ins.a) .. " == " .. (v == 1 and "true" or "false")
             elseif ins.name == "JUMPXEQKN" or ins.name == "JUMPXEQKS" then
                 local k = (ins.aux or 0) % 0x1000000
-                cnd = rcode(ins.a) .. " == " .. cstr(proto, k)
+                cnd = rc(ins.word_idx, ins.a) .. " == " .. cstr(proto, k)
             end
             parts[#parts + 1] = cnd
             last_op = this_op
@@ -186,25 +177,18 @@ local function decompile_proto(proto_idx, parsed, indent_base, wrap_as_function)
         return "(" .. table.concat(parts, " " .. last_op .. " ") .. ")", target
     end
 
-    -- Построение подписей структур
     local struct_by_header = {}
-    local struct_by_end = {}
-    local cfglabels = cfg and cfg.labels or {}
-    local cfgends = cfg and cfg.ends or {}
     local structs = cfg and cfg.structs or {}
     for _, s in ipairs(structs) do
         if s.header_pc then struct_by_header[s.header_pc] = s end
-        if s.end_pc then
-            struct_by_end[s.end_pc] = struct_by_end[s.end_pc] or {}
-            table.insert(struct_by_end[s.end_pc], s)
-        end
     end
 
     local skip_pc = {}
     local idx_at = {}
     for i, ins in ipairs(instrs) do idx_at[ins.word_idx] = i end
 
-    -- Прямой рендер всего прототипа с учётом структур
+    local render_ins
+
     local function render(start_idx, end_idx, level)
         local result = {}
         local i = start_idx
@@ -217,10 +201,8 @@ local function decompile_proto(proto_idx, parsed, indent_base, wrap_as_function)
             else
                 local s = struct_by_header[pc]
                 if s and s.kind == "if" then
-                    local cond = build_chain_cond(ins)
-                    if not cond then cond = "true" end
+                    local cond = build_chain_cond(ins) or "true"
                     table.insert(result, string.rep("    ", level) .. "if " .. cond .. " then")
-                    -- тело then
                     local then_start = idx_at[s.body_start] or (i + 1)
                     local then_end
                     if s.has_else then
@@ -238,7 +220,6 @@ local function decompile_proto(proto_idx, parsed, indent_base, wrap_as_function)
                         for _, l in ipairs(ebody) do table.insert(result, l) end
                     end
                     table.insert(result, string.rep("    ", level) .. "end")
-                    -- отметить skip до end_pc
                     for j = i, (idx_at[s.end_pc] or i) - 1 do
                         if instrs[j] then skip_pc[instrs[j].word_idx] = true end
                     end
@@ -251,24 +232,12 @@ local function decompile_proto(proto_idx, parsed, indent_base, wrap_as_function)
                     end
                     local cond = "true"
                     if cond_ins then
-                        local c = build_chain_cond(cond_ins)
-                        if c then
-                            -- инвертируем: while ожидает истинное условие, а JUMPIF ведёт на выход
-                            if cond_ins.name == "JUMPIFNOT" then
-                                cond = rc(cond_pc, cond_ins.a)
-                            elseif cond_ins.name == "JUMPIF" then
-                                cond = "not " .. rc(cond_pc, cond_ins.a)
-                            elseif cond_ins.name == "JUMPIFEQ" then
-                                cond = rc(cond_pc, cond_ins.a) .. " ~= " .. rc(cond_pc, cond_ins.aux or 0)
-                            elseif cond_ins.name == "JUMPIFNOTEQ" then
-                                cond = rc(cond_pc, cond_ins.a) .. " == " .. rc(cond_pc, cond_ins.aux or 0)
-                            elseif cond_ins.name == "JUMPIFLT" then
-                                cond = rc(cond_pc, cond_ins.a) .. " >= " .. rc(cond_pc, cond_ins.aux or 0)
-                            elseif cond_ins.name == "JUMPIFLE" then
-                                cond = rc(cond_pc, cond_ins.a) .. " > " .. rc(cond_pc, cond_ins.aux or 0)
-                            else
-                                cond = c
-                            end
+                        if cond_ins.name == "JUMPIFNOT" then
+                            cond = rc(cond_pc, cond_ins.a)
+                        elseif cond_ins.name == "JUMPIF" then
+                            cond = "not " .. rc(cond_pc, cond_ins.a)
+                        else
+                            cond = build_chain_cond(cond_ins) or "true"
                         end
                     end
                     table.insert(result, string.rep("    ", level) .. "while " .. cond .. " do")
@@ -287,22 +256,19 @@ local function decompile_proto(proto_idx, parsed, indent_base, wrap_as_function)
                     local b_end = (idx_at[s.end_pc] or (#instrs + 1)) - 1
                     local body = render(b_start, b_end, level + 1)
                     for _, l in ipairs(body) do table.insert(result, l) end
-                    table.insert(result, string.rep("    ", level) .. "until true")
+                    table.insert(result, string.rep("    ", level) .. "until false")
                     for j = i, (idx_at[s.end_pc] or i) - 1 do
                         if instrs[j] then skip_pc[instrs[j].word_idx] = true end
                     end
                     i = idx_at[s.end_pc] or (i + 1)
                 elseif s and s.kind == "fornum" then
-                    -- разбираем 3 регистра: limit, step, index
                     local a = ins.a
                     local limit = rc(pc, a)
                     local step = rc(pc, a + 1)
-                    local start = rc(pc, a + 2)
-                    local var_name = wc(pc + 3, a + 2) or ("i" .. tostring(pc))
-                    local header = string.rep("    ", level) .. "for " .. var_name .. " = " .. start .. ", " .. limit
-                    if step and step ~= "1" then
-                        header = header .. ", " .. step
-                    end
+                    local start_v = rc(pc, a + 2)
+                    local var_name = wc(pc, a + 2) or ("i" .. tostring(pc))
+                    local header = string.rep("    ", level) .. "for " .. var_name .. " = " .. start_v .. ", " .. limit
+                    if step and step ~= "1" then header = header .. ", " .. step end
                     header = header .. " do"
                     table.insert(result, header)
                     local b_start = idx_at[s.body_start] or (i + 1)
@@ -317,7 +283,6 @@ local function decompile_proto(proto_idx, parsed, indent_base, wrap_as_function)
                 elseif s and s.kind == "forgen" then
                     local b_start = idx_at[s.body_start] or (i + 1)
                     local b_end = (idx_at[s.end_pc] or (#instrs + 1)) - 1
-                    -- смотрим FORGLOOP, чтобы узнать кол-во переменных
                     local nvars = 2
                     for _, x in ipairs(instrs) do
                         if x.word_idx == (s.body_end or -1) and x.name == "FORGLOOP" then
@@ -330,7 +295,7 @@ local function decompile_proto(proto_idx, parsed, indent_base, wrap_as_function)
                     for k = 1, nvars do
                         var_list[k] = wc(pc, ins.a + 2 + k) or ("v" .. k)
                     end
-                    table.insert(result, string.rep("    ", level) .. "for " .. table.concat(var_list, ", ") .. " in ... do")
+                    table.insert(result, string.rep("    ", level) .. "for " .. table.concat(var_list, ", ") .. " in nil do")
                     local body = render(b_start, b_end, level + 1)
                     for _, l in ipairs(body) do table.insert(result, l) end
                     table.insert(result, string.rep("    ", level) .. "end")
@@ -339,7 +304,6 @@ local function decompile_proto(proto_idx, parsed, indent_base, wrap_as_function)
                     end
                     i = idx_at[s.end_pc] or (i + 1)
                 else
-                    -- обычная инструкция
                     local lines = render_ins(ins, level)
                     if lines then
                         for _, l in ipairs(lines) do table.insert(result, l) end
@@ -351,18 +315,16 @@ local function decompile_proto(proto_idx, parsed, indent_base, wrap_as_function)
         return result
     end
 
-    function render_ins(ins, level)
+    render_ins = function(ins, level)
         local pc = ins.word_idx
         local p = string.rep("    ", level)
         local n = ins.name
 
-        -- пропускаем всё, что не создаёт видимый код
         if n == "NOP" or n == "PREPVARARGS" or n == "CAPTURE"
             or n == "CLOSEUPVALS" or n == "COVERAGE" or n == "BREAK" then
             return nil
         end
 
-        -- дед-код: если все writes мертвы — пропускаем
         if ssa_data then
             local wr = ssa_data.write_at[pc]
             if wr and next(wr) and n ~= "CALL" and n ~= "CALLFB" then
@@ -384,55 +346,44 @@ local function decompile_proto(proto_idx, parsed, indent_base, wrap_as_function)
         if n == "GETGLOBAL" then return {p .. wc(pc, ins.a) .. " = " .. cstr(proto, ins.aux or 0)} end
         if n == "GETUPVAL" then return {p .. wc(pc, ins.a) .. " = upval" .. ins.b} end
         if n == "GETIMPORT" then return {p .. wc(pc, ins.a) .. " = " .. cstr(proto, ins.d)} end
-        if n == "GETTABLE" then
-            return {p .. wc(pc, ins.a) .. " = " .. rc(pc, ins.b) .. "[" .. rc(pc, ins.c) .. "]"}
-        end
+        if n == "GETTABLE" then return {p .. wc(pc, ins.a) .. " = " .. rc(pc, ins.b) .. "[" .. rc(pc, ins.c) .. "]"} end
         if n == "GETTABLEKS" then
             local mn = member_name(proto, ins.aux or 0)
-            if mn then
-                return {p .. wc(pc, ins.a) .. " = " .. rc(pc, ins.b) .. "." .. mn}
-            end
+            if mn then return {p .. wc(pc, ins.a) .. " = " .. rc(pc, ins.b) .. "." .. mn} end
             return {p .. wc(pc, ins.a) .. " = " .. rc(pc, ins.b) .. "[" .. cstr(proto, ins.aux or 0) .. "]"}
         end
-        if n == "GETTABLEN" then
-            return {p .. wc(pc, ins.a) .. " = " .. rc(pc, ins.b) .. "[" .. (ins.c + 1) .. "]"}
-        end
+        if n == "GETTABLEN" then return {p .. wc(pc, ins.a) .. " = " .. rc(pc, ins.b) .. "[" .. (ins.c + 1) .. "]"} end
         if n == "NEWTABLE" then return {p .. wc(pc, ins.a) .. " = {}"} end
         if n == "NEWCLOSURE" then
             local child_idx = proto.children[ins.d + 1]
             local child_lines = decompile_proto(child_idx, parsed, 0, true)
-            local head = p .. wc(pc, ins.a) .. " = function(...)"
             local body_lines = {}
             for _, l in ipairs(child_lines) do table.insert(body_lines, "    " .. l) end
             table.insert(body_lines, p .. "end")
-            table.insert(body_lines, 1, head)
+            table.insert(body_lines, 1, p .. wc(pc, ins.a) .. " = function(...)")
             return body_lines
         end
-        if n == "DUPCLOSURE" then return {p .. wc(pc, ins.a) .. " = --[[ dupclosure K" .. ins.d .. " ]] function() end"} end
+        if n == "DUPCLOSURE" then return {p .. wc(pc, ins.a) .. " = nil --[[ dupclosure ]]"} end
         if n == "SETUPVAL" then return {p .. "upval" .. ins.b .. " = " .. rc(pc, ins.a)} end
         if n == "SETGLOBAL" then return {p .. cstr(proto, ins.aux or 0) .. " = " .. rc(pc, ins.a)} end
-        if n == "SETTABLE" then
-            return {p .. rc(pc, ins.b) .. "[" .. rc(pc, ins.c) .. "] = " .. rc(pc, ins.a)}
-        end
+        if n == "SETTABLE" then return {p .. rc(pc, ins.b) .. "[" .. rc(pc, ins.c) .. "] = " .. rc(pc, ins.a)} end
         if n == "SETTABLEKS" then
             local mn = member_name(proto, ins.aux or 0)
-            if mn then
-                return {p .. rc(pc, ins.b) .. "." .. mn .. " = " .. rc(pc, ins.a)}
-            end
+            if mn then return {p .. rc(pc, ins.b) .. "." .. mn .. " = " .. rc(pc, ins.a)} end
             return {p .. rc(pc, ins.b) .. "[" .. cstr(proto, ins.aux or 0) .. "] = " .. rc(pc, ins.a)}
         end
-        if n == "SETTABLEN" then
-            return {p .. rc(pc, ins.b) .. "[" .. (ins.c + 1) .. "] = " .. rc(pc, ins.a)}
-        end
+        if n == "SETTABLEN" then return {p .. rc(pc, ins.b) .. "[" .. (ins.c + 1) .. "] = " .. rc(pc, ins.a)} end
         if n == "SETLIST" then return nil end
 
         if n == "CALL" or n == "CALLFB" then
             local nres = ins.c - 1
             local nargs = ins.b - 1
             local args = {}
-            for k = 1, nargs do args[#args + 1] = rc(pc, ins.a + k) end
+            for k = 1, nargs do
+                local a = rc(pc, ins.a + k)
+                args[#args + 1] = a or "nil"
+            end
 
-            -- NAMECALL pattern
             local fn_ver = ssa_data and ssa_data.read_at and ssa_data.read_at[pc]
             fn_ver = fn_ver and fn_ver[ins.a]
             local namcall_ins = nil
@@ -440,23 +391,22 @@ local function decompile_proto(proto_idx, parsed, indent_base, wrap_as_function)
                 local d_pc = ssa_data.versions[fn_ver].def_pc
                 if d_pc and d_pc >= 0 then
                     for _, x in ipairs(instrs) do
-                        if x.word_idx == d_pc and x.name == "NAMECALL" then
-                            namcall_ins = x
-                            break
-                        end
+                        if x.word_idx == d_pc and x.name == "NAMECALL" then namcall_ins = x; break end
                     end
                 end
             end
 
             local call_expr
             if namcall_ins then
-                local self_expr = rc(namcall_ins.word_idx, namcall_ins.b)
-                local mn = cstr(proto, namcall_ins.aux or 0)
+                local self_expr = rc(namcall_ins.word_idx, namcall_ins.b) or "nil"
+                local mn = member_name(proto, namcall_ins.aux or 0) or cstr(proto, namcall_ins.aux or 0)
                 local real_args = {}
-                for k = 2, nargs do real_args[#real_args + 1] = args[k] end
+                for k = 2, nargs do
+                    real_args[#real_args + 1] = args[k] or "nil"
+                end
                 call_expr = self_expr .. ":" .. mn .. "(" .. table.concat(real_args, ", ") .. ")"
             else
-                local fn = rc(pc, ins.a)
+                local fn = rc(pc, ins.a) or "nil"
                 call_expr = fn .. "(" .. table.concat(args, ", ") .. ")"
             end
 
@@ -480,40 +430,30 @@ local function decompile_proto(proto_idx, parsed, indent_base, wrap_as_function)
             local nres = ins.b - 1
             if nres <= 0 then return {p .. "return"} end
             local vals = {}
-            for k = 0, nres - 1 do vals[#vals + 1] = rc(pc, ins.a + k) end
+            for k = 0, nres - 1 do vals[#vals + 1] = rc(pc, ins.a + k) or "nil" end
             return {p .. "return " .. table.concat(vals, ", ")}
         end
 
-        if n == "JUMP" or n == "JUMPBACK" or n == "JUMPX" then
-            return nil
-        end
+        if n == "JUMP" or n == "JUMPBACK" or n == "JUMPX" then return nil end
         if is_cond_jump(n) then
-            local cnd = build_chain_cond(ins)
-            return {p .. "-- if " .. (cnd or "?") .. " then ... end"}
+            local cnd = build_chain_cond(ins) or "false"
+            return {p .. "-- if " .. cnd .. " then ... end"}
         end
-
         if n == "GETVARARGS" then return {p .. wc(pc, ins.a) .. " = ..."} end
-        if n == "FORNPREP" or n == "FORNLOOP" or n == "FORGPREP" or n == "FORGLOOP" then
-            return nil
-        end
+        if n == "FORNPREP" or n == "FORNLOOP" or n == "FORGPREP" or n == "FORGLOOP" then return nil end
 
         return nil
     end
 
-    -- тело прототипа
     local body = render(1, #instrs, indent)
 
     if wrap_as_function then
         local params = {}
-        for k = 1, (proto.numparams or 0) do
-            params[#params + 1] = "arg" .. k
-        end
+        for k = 1, (proto.numparams or 0) do params[#params + 1] = "arg" .. k end
         if proto.is_vararg then params[#params + 1] = "..." end
         local head = "function(" .. table.concat(params, ", ") .. ")"
         local wrapped = {head}
-        for _, l in ipairs(body) do
-            table.insert(wrapped, "    " .. l)
-        end
+        for _, l in ipairs(body) do table.insert(wrapped, "    " .. l) end
         table.insert(wrapped, "end")
         return wrapped
     end
@@ -521,14 +461,14 @@ local function decompile_proto(proto_idx, parsed, indent_base, wrap_as_function)
     return body
 end
 
--- Публичная функция: декомпилировать текущий прототип
+function M.full_script_local(parsed)
+    if not parsed or not parsed.protos then return nil, "no parsed data" end
+    local body = decompile_proto(1, parsed, 0, false)
+    return table.concat(body, "\n"), nil
+end
+
 function M.from_proto(proto, instrs, ssa_data, expr_db, cfg)
-    -- совместимость со старым API: локальный рендер одного прототипа
-    local fake_parsed = {
-        protos = {proto},
-        strings = {},
-    }
-    -- хак: подменяем парсер, чтобы iter_instrs вернул готовый список
+    local fake_parsed = { protos = {proto}, strings = {} }
     local saved_iter = parser.iter_instrs
     parser.iter_instrs = function() return instrs end
     local result = decompile_proto(1, fake_parsed, 0, false)
@@ -536,13 +476,63 @@ function M.from_proto(proto, instrs, ssa_data, expr_db, cfg)
     return table.concat(result, "\n")
 end
 
--- Публичная функция: декомпилировать весь скрипт
-function M.full_script(parsed)
-    if not parsed or not parsed.protos then
-        return nil, "no parsed data"
+--=====================================================================
+-- D1 API (MEGGD)
+--=====================================================================
+
+function M.api_decompile(bytecode_str)
+    if type(bytecode_str) ~= "string" or #bytecode_str == 0 then
+        return nil, "empty bytecode"
     end
-    local body = decompile_proto(1, parsed, 0, false)
-    return table.concat(body, "\n"), nil
+    if typeof(request) ~= "function" then
+        return nil, "request unavailable"
+    end
+
+    local parts = {}
+    for i = 1, #bytecode_str do
+        parts[#parts + 1] = string.format("%02X", string.byte(bytecode_str, i))
+    end
+    local hex = table.concat(parts, " ")
+
+    local HttpService = game:GetService("HttpService")
+    local body_ok, body = pcall(function()
+        return HttpService:JSONEncode({code = hex})
+    end)
+    if not body_ok then return nil, "json encode failed: " .. tostring(body) end
+
+    local ok, res = pcall(request, {
+        Url = API_URL,
+        Method = "POST",
+        Headers = {["Content-Type"] = "application/json"},
+        Body = body,
+    })
+    if not ok then return nil, "request failed: " .. tostring(res) end
+    if type(res) ~= "table" then return nil, "bad response type" end
+    if res.StatusCode ~= 200 then
+        return nil, "status " .. tostring(res.StatusCode) .. ": " .. tostring(res.Body)
+    end
+
+    local dec_ok, data = pcall(function()
+        return HttpService:JSONDecode(res.Body)
+    end)
+    if not dec_ok then return nil, "json decode failed: " .. tostring(data) end
+    if type(data) ~= "table" or not data.result then
+        return nil, "no result field in response"
+    end
+    return data.result
+end
+
+-- Оркестратор: сначала D1, потом локальный
+function M.decompile_best(bytecode_str, parsed)
+    local api_src, api_err = M.api_decompile(bytecode_str)
+    if api_src and #api_src > 0 then
+        return api_src, "d1"
+    end
+    local local_src, local_err = M.full_script_local(parsed)
+    if local_src then
+        return local_src, "local", api_err
+    end
+    return nil, nil, "d1: " .. tostring(api_err) .. " | local: " .. tostring(local_err)
 end
 
 function M.init(bc)
