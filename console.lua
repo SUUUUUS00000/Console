@@ -117,7 +117,7 @@ function M.register(name, handler, description)
     commands[name:lower()] = {handler = handler, description = description or ""}
 end
 
---========= ПОДСКАЗКИ =========
+--========= SUGGESTIONS =========
 
 local function hide_suggestions()
     if not suggest_frame then return end
@@ -126,7 +126,7 @@ local function hide_suggestions()
 end
 
 local function clear_suggestions()
-    if not suggest_list then return end
+    if not suggest_scroll then return end
     for _, v in ipairs(suggest_scroll:GetChildren()) do
         if v:IsA("TextButton") then v:Destroy() end
     end
@@ -167,7 +167,7 @@ local function make_suggestion_row(text, subtitle, on_click)
         sub.TextSize = 12
         sub.TextXAlignment = Enum.TextXAlignment.Right
         sub.TextYAlignment = Enum.TextYAlignment.Center
-        sub.TextTruncate = Enum.TextTruncate.AtStart
+        sub.TextTruncate = Enum.TextTruncate.AtEnd
         sub.Parent = row
     end
 
@@ -246,15 +246,7 @@ local function update_suggestions()
         for _, s in ipairs(results) do
             local name = s:GetFullName()
             btns[#btns + 1] = make_suggestion_row(name, s.ClassName, function()
-                if cmd == "load" then
-                    inp.Text = "loadpath " .. name
-                elseif cmd == "loadpath" then
-                    inp.Text = "loadpath " .. name
-                elseif cmd == "loadin" then
-                    inp.Text = "loadpath " .. name
-                else
-                    inp.Text = "loadpath " .. name
-                end
+                inp.Text = "loadpath " .. name
                 inp:CaptureFocus()
                 suggest_clicked = false
                 task.defer(function()
@@ -366,7 +358,6 @@ function M.start(bc)
     vbar.Visible = false
     vbar.Parent = minBtn
 
-    -- suggestions panel
     suggest_frame = Instance.new("Frame")
     suggest_frame.Size = UDim2.new(1, 0, 0, 0)
     suggest_frame.Position = UDim2.new(0, 0, 0, 32)
