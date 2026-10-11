@@ -17,6 +17,7 @@ M.state = {
     dirty = false,
     last_src = nil,
     last_source_kind = nil,
+    user_src = nil,
 }
 
 local active_hooks = {}
@@ -162,6 +163,7 @@ function M.load_script(name)
     st.dirty = false
     st.last_src = nil
     st.last_source_kind = nil
+    st.user_src = nil
     if BC.modules.panel and BC.modules.panel.render_all then
         BC.modules.panel.render_all()
     end
@@ -203,6 +205,11 @@ end
 
 function M.decompile_full()
     local st = M.state
+    if st.user_src then
+        st.last_src = st.user_src
+        st.last_source_kind = "user"
+        return st.user_src, nil, "user"
+    end
     if not st or not st.working or not st.parsed then
         return nil, "no script loaded"
     end
@@ -224,7 +231,7 @@ function M.apply_edit(script, new_bytes)
 
     local src, _, kind = M.decompile_full()
     if not src then
-        return false, "d1 decompile failed: " .. tostring(kind)
+        return false, "decompile failed: " .. tostring(kind)
     end
 
     console.log("apply: source from " .. tostring(kind) .. " (" .. #src .. "b)", C.dim)
@@ -232,7 +239,6 @@ function M.apply_edit(script, new_bytes)
     local fn, load_err = loadstring(src, "@" .. script.Name)
 
     if not fn then
-        -- фабрика upvalues: если в исходнике есть upvalN, оборачиваем в фабрику
         local info_ok, info = pcall(debug.getinfo, cl)
         local nups = (info_ok and info and info.nups) or 0
         if nups > 0 then
@@ -301,7 +307,10 @@ function M.do_apply()
     local C = console.colors()
     local st = M.state
     if not st.script then console.log("no script", C.err); return end
-    if not st.dirty then console.log("nothing to save", C.dim); return end
+    if not st.dirty and not st.user_src then
+        console.log("nothing to save", C.dim)
+        return
+    end
     local ok, err = M.apply_edit(st.script, st.working)
     if not ok then console.log("apply failed: " .. tostring(err), C.err); return end
     st.baseline = st.working
@@ -317,6 +326,7 @@ function M.revert()
     local C = console.colors()
     local st = M.state
     if not st.script then return end
+    st.user_src = nil
     M.revert_edit(st.script)
     if st.original then
         st.working = st.original
@@ -334,7 +344,6 @@ end
 -- КОМАНДЫ ПОИСКА И ЗАМЕНЫ ПО ЗНАЧЕНИЮ
 --=====================================================================
 
--- findnum <value> — найти все LOADN/LOADK, где значение совпадает
 function M.findnum_cmd(a)
     local C = console.colors()
     local st = M.state
@@ -365,7 +374,6 @@ function M.findnum_cmd(a)
     console.log("total: " .. found, found > 0 and C.ok or C.dim)
 end
 
--- setnum <old> <new> [proto] — заменить первое вхождение old на new
 function M.setnum_cmd(a)
     local C = console.colors()
     local st = M.state
@@ -378,7 +386,6 @@ function M.setnum_cmd(a)
     end
     local proto = st.parsed.protos[st.proto_idx]
 
-    -- ищем первую подходящую
     local target_ins = nil
     for _, ins in ipairs(st.instrs) do
         if ins.name == "LOADN" and ins.d == old_val then
