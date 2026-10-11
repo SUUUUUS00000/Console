@@ -28,7 +28,7 @@ local C = {
     suggest_bg = px(28, 28, 30),
 }
 
-local FONT = Enum.Font.Arcade
+local FONT = Enum.Font.Code
 local TSIZE = 14
 
 local MAX_LOG = 5000
@@ -40,18 +40,18 @@ local gui_root, sg
 local main, inp, minBtn, hbar, vbar
 local panel, hintBar, hl, out, sb
 
-local suggest_frame, suggest_scroll, suggest_list
-local suggest_visible = false
+local suggest_frame, suggest_scroll
 local suggest_clicked = false
 
-local function drag(frame)
+local function drag_begin(frame)
     frame.InputBegan:Connect(function(i)
         if i.UserInputType == Enum.UserInputType.MouseButton1
         or i.UserInputType == Enum.UserInputType.Touch then
+            if i.Target == inp then return end
             dragOn = true
-            dragFrame = frame
+            dragFrame = main
             dragStart = i.Position
-            dragPos = frame.Position
+            dragPos = main.Position
         end
     end)
 end
@@ -120,9 +120,7 @@ end
 --========= SUGGESTIONS =========
 
 local function hide_suggestions()
-    if not suggest_frame then return end
-    suggest_frame.Visible = false
-    suggest_visible = false
+    if suggest_frame then suggest_frame.Visible = false end
 end
 
 local function clear_suggestions()
@@ -134,7 +132,7 @@ end
 
 local function make_suggestion_row(text, subtitle, on_click)
     local row = Instance.new("TextButton")
-    row.Size = UDim2.new(1, 0, 0, 24)
+    row.Size = UDim2.new(1, 0, 0, 26)
     row.BackgroundColor3 = C.suggest_bg
     row.BorderSizePixel = 0
     row.Text = ""
@@ -156,10 +154,10 @@ local function make_suggestion_row(text, subtitle, on_click)
     main_lbl.Parent = row
 
     if subtitle and subtitle ~= "" then
-        main_lbl.Size = UDim2.new(0.55, 0, 1, 0)
+        main_lbl.Size = UDim2.new(0.6, 0, 1, 0)
         local sub = Instance.new("TextLabel")
-        sub.Size = UDim2.new(0.45, -10, 1, 0)
-        sub.Position = UDim2.new(0.55, 0, 0, 0)
+        sub.Size = UDim2.new(0.4, -10, 1, 0)
+        sub.Position = UDim2.new(0.6, 0, 0, 0)
         sub.BackgroundTransparency = 1
         sub.Text = subtitle
         sub.TextColor3 = C.hint
@@ -193,14 +191,13 @@ local function show_suggestions(rows)
     end
     local max_visible = 6
     local shown = math.min(#rows, max_visible)
-    suggest_scroll.CanvasSize = UDim2.new(0, 0, 0, #rows * 24)
-    suggest_frame.Size = UDim2.new(1, 0, 0, shown * 24 + 4)
+    suggest_scroll.CanvasSize = UDim2.new(0, 0, 0, #rows * 26)
+    suggest_frame.Size = UDim2.new(1, 0, 0, shown * 26 + 4)
     suggest_frame.Visible = true
-    suggest_visible = true
 end
 
 local function update_suggestions()
-    if not suggest_frame then return end
+    if not suggest_frame or not inp then return end
     local txt = inp.Text
     if txt == "" then
         hide_suggestions()
@@ -214,20 +211,16 @@ local function update_suggestions()
         local names = {}
         for name in pairs(commands) do names[#names + 1] = name end
         table.sort(names)
-        local rows = {}
+        local btns = {}
         for _, name in ipairs(names) do
             if name:sub(1, #prefix) == prefix then
-                rows[#rows + 1] = { name = name, desc = commands[name].description }
+                btns[#btns + 1] = make_suggestion_row(name, commands[name].description, function()
+                    inp.Text = name .. " "
+                    inp:CaptureFocus()
+                    suggest_clicked = false
+                    task.defer(update_suggestions)
+                end)
             end
-        end
-        local btns = {}
-        for _, r in ipairs(rows) do
-            btns[#btns + 1] = make_suggestion_row(r.name, r.desc, function()
-                inp.Text = r.name .. " "
-                inp:CaptureFocus()
-                suggest_clicked = false
-                task.defer(update_suggestions)
-            end)
         end
         show_suggestions(btns)
         return
@@ -269,8 +262,6 @@ local function update_suggestions()
     hide_suggestions()
 end
 
---========= SUBMIT =========
-
 local function submit()
     if not inp then return end
     local txt = inp.Text
@@ -291,8 +282,6 @@ local function submit()
     hide_suggestions()
 end
 
---========= START =========
-
 function M.start(bc)
     BC = bc
     gui_root = (gethui and gethui()) or game:GetService("CoreGui")
@@ -312,6 +301,7 @@ function M.start(bc)
     main.BackgroundColor3 = C.bar
     main.BorderColor3 = C.border
     main.BorderSizePixel = 2
+    main.ClipsDescendants = false
     main.ZIndex = 50
     main.Parent = sg
 
@@ -343,31 +333,34 @@ function M.start(bc)
 
     hbar = Instance.new("Frame")
     hbar.AnchorPoint = Vector2.new(0.5, 0.5)
-    hbar.Size = UDim2.new(0, 10, 0, 2)
+    hbar.Size = UDim2.new(0, 12, 0, 2)
     hbar.Position = UDim2.new(0.5, 0, 0.5, 0)
     hbar.BackgroundColor3 = px(255, 255, 255)
     hbar.BorderSizePixel = 0
+    hbar.ZIndex = 52
     hbar.Parent = minBtn
 
     vbar = Instance.new("Frame")
     vbar.AnchorPoint = Vector2.new(0.5, 0.5)
-    vbar.Size = UDim2.new(0, 2, 0, 10)
+    vbar.Size = UDim2.new(0, 2, 0, 12)
     vbar.Position = UDim2.new(0.5, 0, 0.5, 0)
     vbar.BackgroundColor3 = px(255, 255, 255)
     vbar.BorderSizePixel = 0
     vbar.Visible = false
+    vbar.ZIndex = 52
     vbar.Parent = minBtn
 
+    -- suggest_frame как дочерний main
     suggest_frame = Instance.new("Frame")
     suggest_frame.Size = UDim2.new(1, 0, 0, 0)
-    suggest_frame.Position = UDim2.new(0, 0, 0, 32)
+    suggest_frame.Position = UDim2.new(0, 0, 1, 2)
     suggest_frame.BackgroundColor3 = C.suggest_bg
     suggest_frame.BorderColor3 = C.border
     suggest_frame.BorderSizePixel = 2
     suggest_frame.Visible = false
-    suggest_frame.ZIndex = 60
     suggest_frame.ClipsDescendants = true
-    suggest_frame.Parent = sg
+    suggest_frame.ZIndex = 70
+    suggest_frame.Parent = main
 
     suggest_scroll = Instance.new("ScrollingFrame")
     suggest_scroll.Size = UDim2.new(1, -4, 1, -4)
@@ -377,10 +370,10 @@ function M.start(bc)
     suggest_scroll.ScrollBarThickness = 4
     suggest_scroll.ScrollBarImageColor3 = C.border
     suggest_scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-    suggest_scroll.ZIndex = 61
+    suggest_scroll.ZIndex = 71
     suggest_scroll.Parent = suggest_frame
 
-    suggest_list = Instance.new("UIListLayout")
+    local suggest_list = Instance.new("UIListLayout")
     suggest_list.Padding = UDim.new(0, 0)
     suggest_list.SortOrder = Enum.SortOrder.LayoutOrder
     suggest_list.Parent = suggest_scroll
@@ -446,10 +439,10 @@ function M.start(bc)
     upl.PaddingTop = UDim.new(0, 4)
     upl.Parent = sb
 
-    drag(main)
+    drag_begin(main)
 
     inp:GetPropertyChangedSignal("Text"):Connect(function()
-        update_suggestions()
+        task.defer(update_suggestions)
     end)
 
     inp.Focused:Connect(function()
@@ -460,7 +453,7 @@ function M.start(bc)
         if enter then
             submit()
         else
-            task.delay(0.15, function()
+            task.delay(0.2, function()
                 if not suggest_clicked then
                     hide_suggestions()
                 end
