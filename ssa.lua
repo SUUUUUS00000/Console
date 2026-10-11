@@ -171,7 +171,7 @@ local function analyze_blocks(instrs)
         if is_branching(ins.name) then
             local t = jump_target(ins)
             if index[t] then leaders[index[t]] = true end
-            if index[i + 1] then leaders[i + 1] = true end
+            if i < #instrs then leaders[i + 1] = true end
         end
     end
 
@@ -192,31 +192,42 @@ local function analyze_blocks(instrs)
 
     local preds = {}
     for bi = 1, #blocks do preds[bi] = {} end
+
+    local function add_pred(target_i, from_bi)
+        if not target_i then return end
+        local tb = block_of[target_i]
+        if not tb then return end
+        if not preds[tb] then preds[tb] = {} end
+        table.insert(preds[tb], from_bi)
+    end
+
     for i, ins in ipairs(instrs) do
         local bi = block_of[i]
-        if is_unconditional_jump(ins.name) then
-            local t = jump_target(ins)
-            if index[t] then table.insert(preds[block_of[index[t]]], bi) end
-        elseif is_cond_jump(ins.name) then
-            local t = jump_target(ins)
-            if index[t] then table.insert(preds[block_of[index[t]]], bi) end
-            if index[i + 1] then table.insert(preds[block_of[i + 1]], bi) end
-        elseif ins.name == "LOADB" and ins.c ~= 0 then
-            local t = jump_target(ins)
-            if index[t] then table.insert(preds[block_of[index[t]]], bi) end
-            if index[i + 1] then table.insert(preds[block_of[i + 1]], bi) end
-        elseif ins.name == "FORNPREP" or ins.name == "FORGPREP"
-            or ins.name == "FORGPREP_INEXT" or ins.name == "FORGPREP_NEXT" then
-            local t = jump_target(ins)
-            if index[t] then table.insert(preds[block_of[index[t]]], bi) end
-            if index[i + 1] then table.insert(preds[block_of[i + 1]], bi) end
-        elseif ins.name == "FORNLOOP" or ins.name == "FORGLOOP" then
-            local t = jump_target(ins)
-            if index[t] then table.insert(preds[block_of[index[t]]], bi) end
-            if index[i + 1] then table.insert(preds[block_of[i + 1]], bi) end
+        if not bi then
+            -- не должно случаться, но на всякий случай пропускаем
         else
-            if index[i + 1] then
-                table.insert(preds[block_of[i + 1]], bi)
+            if is_unconditional_jump(ins.name) then
+                local t = jump_target(ins)
+                if index[t] then add_pred(index[t], bi) end
+            elseif is_cond_jump(ins.name) then
+                local t = jump_target(ins)
+                if index[t] then add_pred(index[t], bi) end
+                if i < #instrs then add_pred(i + 1, bi) end
+            elseif ins.name == "LOADB" and ins.c ~= 0 then
+                local t = jump_target(ins)
+                if index[t] then add_pred(index[t], bi) end
+                if i < #instrs then add_pred(i + 1, bi) end
+            elseif ins.name == "FORNPREP" or ins.name == "FORGPREP"
+                or ins.name == "FORGPREP_INEXT" or ins.name == "FORGPREP_NEXT" then
+                local t = jump_target(ins)
+                if index[t] then add_pred(index[t], bi) end
+                if i < #instrs then add_pred(i + 1, bi) end
+            elseif ins.name == "FORNLOOP" or ins.name == "FORGLOOP" then
+                local t = jump_target(ins)
+                if index[t] then add_pred(index[t], bi) end
+                if i < #instrs then add_pred(i + 1, bi) end
+            else
+                if i < #instrs then add_pred(i + 1, bi) end
             end
         end
     end
@@ -267,7 +278,6 @@ function M.build(instrs, proto)
         return reg_ver[reg]
     end
 
-    -- loop detection: блоки внутри обратного перехода
     local loop_of = {}
     for i, ins in ipairs(instrs) do
         if is_unconditional_jump(ins.name) or is_cond_jump(ins.name) then
@@ -300,11 +310,9 @@ function M.build(instrs, proto)
                         if entry[r] == nil then
                             entry[r] = pv
                         elseif entry[r] ~= pv then
-                            -- создаём phi
                             local phi_id = new_version(r, -1, "phi")
                             name_of[phi_id] = "phi" .. phi_id
                             entry[r] = phi_id
-                            -- подтягиваем phi в предшественников, чтобы они использовали ту же версию
                             reg_ver[r] = phi_id
                         end
                     end
@@ -324,36 +332,42 @@ function M.build(instrs, proto)
 
             local rr = read_regs(ins)
             for _, r in ipairs(rr) do
-                local v = reg_ver[r]
-                if not v then v = ensure_reg_ver(r) end
-                read_at[pc][r] = v
-                table.insert(versions[v].uses, pc)
+                if type(r) == "number" and r >= 0 then
+                    local v = reg_ver[r]
+                    if not v then v = ensure_reg_ver(r) end
+                    read_at[pc][r] = v
+                    if versions[v] and versions[v].uses then
+                        table.insert(versions[v].uses, pc)
+                    end
+                end
             end
 
             local wr = write_regs(ins)
             for _, r in ipairs(wr) do
-                local is_loop = false
-                if loop_of[bi] and reg_ver[r] then
-                    local prev_v = reg_ver[r]
-                    local prev_def_pc = versions[prev_v].def_pc
-                    if prev_def_pc and prev_def_pc >= 0 then
-                        for bj in pairs(loop_of) do
-                            local bb = blocks[bj]
-                            if bb and prev_def_pc >= bb.start_pc and prev_def_pc <= bb.end_pc then
-                                is_loop = true
-                                break
+                if type(r) == "number" and r >= 0 then
+                    local is_loop = false
+                    if loop_of[bi] and reg_ver[r] then
+                        local prev_v = reg_ver[r]
+                        local prev_def_pc = versions[prev_v].def_pc
+                        if prev_def_pc and prev_def_pc >= 0 then
+                            for bj in pairs(loop_of) do
+                                local bb = blocks[bj]
+                                if bb and prev_def_pc >= bb.start_pc and prev_def_pc <= bb.end_pc then
+                                    is_loop = true
+                                    break
+                                end
                             end
                         end
                     end
-                end
 
-                if is_loop and reg_ver[r] then
-                    write_at[pc][r] = reg_ver[r]
-                    versions[reg_ver[r]].kind = "mut"
-                else
-                    local v = new_version(r, pc, "value")
-                    reg_ver[r] = v
-                    write_at[pc][r] = v
+                    if is_loop and reg_ver[r] then
+                        write_at[pc][r] = reg_ver[r]
+                        versions[reg_ver[r]].kind = "mut"
+                    else
+                        local v = new_version(r, pc, "value")
+                        reg_ver[r] = v
+                        write_at[pc][r] = v
+                    end
                 end
             end
         end
@@ -364,7 +378,6 @@ function M.build(instrs, proto)
         end
     end
 
-    -- финальная классификация
     for id, v in pairs(versions) do
         if v.kind == "value" or v.kind == "phi" then
             if #v.uses == 0 then
