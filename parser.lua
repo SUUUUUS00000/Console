@@ -296,4 +296,83 @@ local function parse_impl(data)
                 local ni
                 ni, pos = rd_var(data, pos)
                 if not ni then return nil, "eof@upval" end
-                pr.upvalues
+                pr.upvalues[j] = ni > 0 and strings[ni] or nil
+            end
+        end
+
+        if version >= 11 then
+            local fbs
+            fbs, pos = rd_var(data, pos)
+            if not fbs then return nil, "eof@fbcount" end
+            for _ = 1, fbs do
+                pos = pos + 1
+                local _, np = rd_var(data, pos)
+                if not np then return nil, "eof@fb" end
+                pos = np
+            end
+        end
+
+        if version >= 12 then
+            if pr.flags and bit32 and bit32.band(pr.flags, 8) ~= 0 then
+                local _, np = rd_var(data, pos)
+                if not np then return nil, "eof@cost" end
+                pos = np
+            end
+            if proto_size > 0 then pos = proto_start + proto_size end
+        end
+
+        protos[i] = pr
+    end
+
+    local main_idx
+    main_idx, pos = rd_var(data, pos)
+    if not main_idx then return nil, "eof@main" end
+    return {version = version, typesversion = typesversion, strings = strings, protos = protos, main = main_idx}
+end
+
+function M.parse(data)
+    local ok, result, err = pcall(parse_impl, data)
+    if not ok then return nil, "parse crash: " .. tostring(result) end
+    if not result then return nil, err or "unknown error" end
+    return result
+end
+
+-- ИСПРАВЛЕНО: шаг = длина инструкции
+function M.iter_instrs(pr)
+    local list = {}
+    local i = 1
+    while i <= pr.sizecode do
+        local wv = pr.code_words[i]
+        if wv == nil then break end
+        local op = insn_op(wv)
+        local nm = OPNAMES[op + 1] or ("OP_" .. op)
+        local two = TWO_WORD[nm] or false
+        list[#list + 1] = {
+            word_idx = i,
+            word = wv,
+            op = op,
+            name = nm,
+            a = insn_a(wv),
+            b = insn_b(wv),
+            c = insn_c(wv),
+            d = insn_d(wv),
+            e = insn_e(wv),
+            aux = two and pr.code_words[i + 1] or nil,
+            byte_offset = pr.code_offset + (i - 1) * 4,
+            length = two and 2 or 1,
+        }
+        -- КРИТИЧНО: здесь был баг i = i + 2
+        i = i + (two and 2 or 1)
+    end
+    return list
+end
+
+M.OPNAMES = OPNAMES
+M.OPIDX = OPIDX
+M.TWO_WORD = TWO_WORD
+
+function M.init(bc)
+    BC = bc
+end
+
+return M
