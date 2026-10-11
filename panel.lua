@@ -2,7 +2,7 @@ local M = {}
 M.name = "panel"
 
 local BC
-local console, parser, disasm, cfgs, patch
+local console, parser, disasm, cfgs, patch, names, varflow
 
 local C
 local gui_root
@@ -149,7 +149,7 @@ local function render_hex()
     end
 end
 
-local function make_edit_row(ins, current_value, proto, labels, indent, on_change)
+local function make_edit_row(ins, current_value, proto, labels, reg_names, indent, on_change)
     local row = Instance.new("Frame")
     row.Size = UDim2.new(1, 0, 0, 22)
     row.BackgroundTransparency = 1
@@ -159,7 +159,7 @@ local function make_edit_row(ins, current_value, proto, labels, indent, on_chang
     lbl.Size = UDim2.new(1, -90, 1, 0)
     lbl.BackgroundTransparency = 1
     lbl.Text = string.rep("  ", indent) .. string.format("%06X  %s",
-        ins.byte_offset, disasm.fmt(ins, proto, labels))
+        ins.byte_offset, disasm.fmt(ins, proto, labels, reg_names))
     local col = C.txt
     if ins.name == "LOADN" or ins.name == "LOADK" then
         col = C.warn
@@ -209,7 +209,7 @@ local function make_edit_row(ins, current_value, proto, labels, indent, on_chang
     table.insert(dis_lines, {f = row, byte_offset = ins.byte_offset, ins = ins})
 end
 
-local function make_read_row(ins, proto, labels, indent)
+local function make_read_row(ins, proto, labels, reg_names, indent)
     local row = Instance.new("Frame")
     row.Size = UDim2.new(1, 0, 0, 18)
     row.BackgroundTransparency = 1
@@ -219,7 +219,7 @@ local function make_read_row(ins, proto, labels, indent)
     lbl.Size = UDim2.new(1, 0, 1, 0)
     lbl.BackgroundTransparency = 1
     lbl.Text = string.rep("  ", indent) .. string.format("%06X  %s",
-        ins.byte_offset, disasm.fmt(ins, proto, labels))
+        ins.byte_offset, disasm.fmt(ins, proto, labels, reg_names))
     local col = C.txt
     if ins.name == "LOADN" or ins.name == "LOADK" then
         col = C.warn
@@ -300,6 +300,7 @@ local function render_dis()
     local labels = analysis.labels
     local ends = analysis.ends
     local indents = analysis.indents
+    local reg_names = names.for_proto(proto, st.instrs)
 
     for _, ins in ipairs(st.instrs) do
         local pc = ins.word_idx
@@ -316,24 +317,24 @@ local function render_dis()
         end
 
         if ins.name == "LOADN" then
-            make_edit_row(ins, ins.d, proto, labels, indent, function(v)
+            make_edit_row(ins, ins.d, proto, labels, reg_names, indent, function(v)
                 patch.apply_edit_loadn(ins, v)
             end)
         elseif ins.name == "LOADB" then
-            make_edit_row(ins, ins.b, proto, labels, indent, function(v)
+            make_edit_row(ins, ins.b, proto, labels, reg_names, indent, function(v)
                 patch.apply_edit_loadb(ins, v ~= 0)
             end)
         elseif ins.name == "LOADK" then
             local c = proto.constants[ins.d + 1]
             if c and c.kind == 2 and type(c.value) == "number" then
-                make_edit_row(ins, c.value, proto, labels, indent, function(v)
+                make_edit_row(ins, c.value, proto, labels, reg_names, indent, function(v)
                     patch.apply_edit_loadk(ins, v)
                 end)
             else
-                make_read_row(ins, proto, labels, indent)
+                make_read_row(ins, proto, labels, reg_names, indent)
             end
         else
-            make_read_row(ins, proto, labels, indent)
+            make_read_row(ins, proto, labels, reg_names, indent)
         end
     end
 
@@ -557,6 +558,8 @@ function M.init(bc)
     disasm = bc.modules.disasm
     cfgs = bc.modules.cfgs
     patch = bc.modules.patch
+    names = bc.modules.names
+    varflow = bc.modules.varflow
     C = console.colors()
     gui_root = console.gui_root()
 end
