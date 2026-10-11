@@ -1,7 +1,7 @@
 -- BC Editor loader v0.1.0
 -- Замени USERNAME/REPO на свои
 
-local BASE = "https://raw.githubusercontent.com/USERNAME/REPO/main/"
+local BASE = "https://raw.githubusercontent.com/SUUUUUS00000/Console/main/"
 
 local MODULES = {
     "console",
