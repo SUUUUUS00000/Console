@@ -12,7 +12,7 @@ local header_info, status_dot
 local left_pane, left_scroll
 local right_pane
 local right_view_frame, right_view_scroll, right_view_content
-local right_edit_frame, right_edit_scroll, right_edit_box
+local right_edit_frame, right_edit_scroll, right_edit_display, right_edit_box
 local footer
 local btn_decompile, btn_edit, btn_revert, btn_exit, btn_save
 
@@ -29,7 +29,31 @@ local u = game:GetService("UserInputService")
 local cam = workspace.CurrentCamera
 
 --=====================================================================
--- SYNTAX HIGHLIGHTING
+-- PIXEL PALETTE
+--=====================================================================
+
+local function px(r, g, b)
+    return Color3.fromRGB(r, g, b)
+end
+
+local P = {
+    bg         = px(24, 24, 28),
+    bg2        = px(32, 32, 38),
+    panel      = px(18, 18, 22),
+    header     = px(40, 40, 48),
+    border     = px(56, 56, 66),
+    border_hi  = px(84, 84, 100),
+    accent     = px(94, 164, 244),
+    ok         = px(88, 214, 122),
+    warn       = px(232, 184, 96),
+    err        = px(240, 96, 96),
+    txt        = px(224, 224, 232),
+    dim        = px(138, 138, 152),
+    hint       = px(74, 74, 86),
+}
+
+--=====================================================================
+-- LUA HIGHLIGHTING
 --=====================================================================
 
 local KEYWORDS = {
@@ -200,23 +224,38 @@ local function highlight(src)
 end
 
 --=====================================================================
--- FRAME HELPERS
+-- PIXEL WIDGETS
 --=====================================================================
 
-local function mk_button(parent, text, w, x, y, color)
-    local b = Instance.new("TextButton")
-    b.Size = UDim2.new(0, w, 0, 26)
-    b.Position = UDim2.new(0, x, 0.5, -13)
-    b.BackgroundColor3 = C.input
-    b.BorderSizePixel = 1
-    b.BorderColor3 = C.border
-    b.Text = text
-    b.TextColor3 = color or C.txt
-    b.Font = Enum.Font.Code
-    b.TextSize = 11
-    b.AutoButtonColor = false
-    b.Parent = parent
-    return b
+-- Кнопка пиксельного стиля: внешняя рамка, внутренний фон, без закруглений
+local function mk_button(parent, text, w, x, color)
+    local outer = Instance.new("Frame")
+    outer.Size = UDim2.new(0, w, 0, 26)
+    outer.Position = UDim2.new(0, x, 0.5, -13)
+    outer.BackgroundColor3 = P.border
+    outer.BorderSizePixel = 0
+    outer.Parent = parent
+
+    local inner = Instance.new("TextButton")
+    inner.Size = UDim2.new(1, -2, 1, -2)
+    inner.Position = UDim2.new(0, 1, 0, 1)
+    inner.BackgroundColor3 = P.panel
+    inner.BorderSizePixel = 0
+    inner.Text = text
+    inner.TextColor3 = color or P.txt
+    inner.Font = Enum.Font.Code
+    inner.TextSize = 11
+    inner.AutoButtonColor = false
+    inner.Parent = outer
+
+    local sep = Instance.new("Frame")
+    sep.Size = UDim2.new(1, -2, 0, 1)
+    sep.Position = UDim2.new(0, 1, 1, -2)
+    sep.BackgroundColor3 = P.border_hi
+    sep.BorderSizePixel = 0
+    sep.Parent = outer
+
+    return inner, outer
 end
 
 local function drag_begin(frame)
@@ -279,7 +318,7 @@ local function render_hex()
         l.Size = UDim2.new(1, 0, 0, 20)
         l.BackgroundTransparency = 1
         l.Text = "  no bytecode"
-        l.TextColor3 = C.dim
+        l.TextColor3 = P.dim
         l.Font = Enum.Font.Code
         l.TextSize = 12
         l.TextXAlignment = Enum.TextXAlignment.Left
@@ -294,19 +333,43 @@ local function render_hex()
         local hx = table.concat(hp, " ")
         while #hx < 47 do hx = hx .. " " end
         local asc = chunk:gsub("[^%g ]", ".")
+
         local r = Instance.new("Frame")
         r.Size = UDim2.new(1, 0, 0, 16)
         r.BackgroundTransparency = 1
         r.Parent = left_scroll
-        local lbl = Instance.new("TextLabel")
-        lbl.Size = UDim2.new(1, 0, 1, 0)
-        lbl.BackgroundTransparency = 1
-        lbl.Text = string.format("%06X  %s |%s|", i - 1, hx, asc)
-        lbl.TextColor3 = C.hex
-        lbl.Font = Enum.Font.Code
-        lbl.TextSize = 12
-        lbl.TextXAlignment = Enum.TextXAlignment.Left
-        lbl.Parent = r
+
+        local addr = Instance.new("TextLabel")
+        addr.Size = UDim2.new(0, 52, 1, 0)
+        addr.BackgroundTransparency = 1
+        addr.Text = string.format("%06X", i - 1)
+        addr.TextColor3 = P.dim
+        addr.Font = Enum.Font.Code
+        addr.TextSize = 12
+        addr.TextXAlignment = Enum.TextXAlignment.Left
+        addr.Parent = r
+
+        local bytes = Instance.new("TextLabel")
+        bytes.Size = UDim2.new(1, -100, 1, 0)
+        bytes.Position = UDim2.new(0, 54, 0, 0)
+        bytes.BackgroundTransparency = 1
+        bytes.Text = hx
+        bytes.TextColor3 = P.txt
+        bytes.Font = Enum.Font.Code
+        bytes.TextSize = 12
+        bytes.TextXAlignment = Enum.TextXAlignment.Left
+        bytes.Parent = r
+
+        local asc_lbl = Instance.new("TextLabel")
+        asc_lbl.Size = UDim2.new(0, 44, 1, 0)
+        asc_lbl.Position = UDim2.new(1, -48, 0, 0)
+        asc_lbl.BackgroundTransparency = 1
+        asc_lbl.Text = "|" .. asc .. "|"
+        asc_lbl.TextColor3 = P.hint
+        asc_lbl.Font = Enum.Font.Code
+        asc_lbl.TextSize = 12
+        asc_lbl.TextXAlignment = Enum.TextXAlignment.Left
+        asc_lbl.Parent = r
     end
 end
 
@@ -363,30 +426,28 @@ local function update_header()
     else
         parts[#parts + 1] = "no script loaded"
     end
-    header_info.Text = "   " .. table.concat(parts, "   ·   ")
+    header_info.Text = "  " .. table.concat(parts, "   ·   ")
 
-    local dot_c = C.dim
+    local dot_c = P.hint
     if st and st.script then
-        if is_dirty then dot_c = C.warn else dot_c = C.ok end
+        if is_dirty then dot_c = P.warn else dot_c = P.ok end
     end
     status_dot.BackgroundColor3 = dot_c
 
     if is_dirty then
-        btn_save.BackgroundColor3 = Color3.fromRGB(36, 90, 50)
-        btn_save.BorderColor3 = Color3.fromRGB(80, 180, 90)
-        btn_save.TextColor3 = Color3.fromRGB(220, 255, 220)
+        btn_save.BackgroundColor3 = px(34, 76, 46)
+        btn_save.TextColor3 = P.ok
     else
-        btn_save.BackgroundColor3 = C.input
-        btn_save.BorderColor3 = C.border
-        btn_save.TextColor3 = C.dim
+        btn_save.BackgroundColor3 = P.panel
+        btn_save.TextColor3 = P.dim
     end
 
     if mode == "edit" then
         btn_edit.Text = "DONE"
-        btn_edit.TextColor3 = C.ok
+        btn_edit.TextColor3 = P.ok
     else
         btn_edit.Text = "EDIT"
-        btn_edit.TextColor3 = C.txt
+        btn_edit.TextColor3 = P.txt
     end
 end
 
@@ -397,14 +458,20 @@ function M.render_all()
 end
 
 --=====================================================================
--- MODE SWITCH
+-- EDIT MODE
 --=====================================================================
+
+local function refresh_edit_display()
+    if not right_edit_display or not right_edit_box then return end
+    right_edit_display.Text = highlight(right_edit_box.Text)
+end
 
 local function enter_edit_mode()
     loading_edit = true
     mode = "edit"
     local src = get_source(false) or ""
     right_edit_box.Text = src
+    right_edit_display.Text = highlight(src)
     loading_edit = false
     is_dirty = false
     render_source_view(false)
@@ -440,18 +507,17 @@ local function revert_all()
 end
 
 local function do_save()
-    local Cc = console.colors()
     local st = patch and patch.state
     if not st or not st.script then
-        console.log("no script", Cc.err)
+        console.log("no script", P.err)
         return
     end
     if not is_dirty and not st.dirty and not st.user_src then
-        console.log("nothing to save", Cc.dim)
+        console.log("nothing to save", P.dim)
         return
     end
     if not patch or not patch.do_apply then
-        console.log("no apply method", Cc.err)
+        console.log("no apply method", P.err)
         return
     end
     patch.do_apply()
@@ -488,19 +554,33 @@ function M.start()
 
     local PANEL_W = 900
     local PANEL_H = 520
-    local HEADER_H = 32
-    local FOOTER_H = 40
-    local BODY_Y = HEADER_H + 2
-    local BODY_H = PANEL_H - HEADER_H - FOOTER_H - 4
+    local HEADER_H = 30
+    local FOOTER_H = 38
+    local BODY_Y = HEADER_H
+    local BODY_H = PANEL_H - HEADER_H - FOOTER_H
+
+    -- Внешняя пиксельная рамка вокруг всей панели
+    local outer = Instance.new("Frame")
+    outer.Size = UDim2.new(0, PANEL_W + 4, 0, PANEL_H + 4)
+    outer.Position = UDim2.new(0.5, -(PANEL_W + 4) / 2, 0.5, -(PANEL_H + 4) / 2)
+    outer.BackgroundColor3 = P.border_hi
+    outer.BorderSizePixel = 0
+    outer.Visible = false
+    outer.Parent = p_sg
 
     bp = Instance.new("Frame")
-    bp.Size = UDim2.new(0, PANEL_W, 0, PANEL_H)
-    bp.Position = UDim2.new(0.5, -PANEL_W / 2, 0.5, -PANEL_H / 2)
-    bp.BackgroundColor3 = C.bg
-    bp.BorderSizePixel = 1
-    bp.BorderColor3 = C.border
-    bp.Visible = false
-    bp.Parent = p_sg
+    bp.Size = UDim2.new(1, -4, 1, -4)
+    bp.Position = UDim2.new(0, 2, 0, 2)
+    bp.BackgroundColor3 = P.bg
+    bp.BorderSizePixel = 0
+    bp.Parent = outer
+
+    -- Внешняя рамка должна двигаться вместе с bp — привязываем логику к outer
+    local old_bp = bp
+    bp = outer  -- для drag_begin и позиционирования используем outer
+
+    -- Реальная внутренняя панель - это old_bp
+    local body = old_bp
 
     --========================
     -- HEADER
@@ -508,45 +588,56 @@ function M.start()
     local header = Instance.new("Frame")
     header.Size = UDim2.new(1, 0, 0, HEADER_H)
     header.Position = UDim2.new(0, 0, 0, 0)
-    header.BackgroundColor3 = C.bar
+    header.BackgroundColor3 = P.header
     header.BorderSizePixel = 0
-    header.Parent = bp
+    header.Parent = body
 
-    local header_sep = Instance.new("Frame")
-    header_sep.Size = UDim2.new(1, 0, 0, 1)
-    header_sep.Position = UDim2.new(0, 0, 1, -1)
-    header_sep.BackgroundColor3 = C.border
-    header_sep.BorderSizePixel = 0
-    header_sep.Parent = header
+    -- Нижняя граница шапки — двойная линия для пиксельности
+    local hs1 = Instance.new("Frame")
+    hs1.Size = UDim2.new(1, 0, 0, 1)
+    hs1.Position = UDim2.new(0, 0, 1, -2)
+    hs1.BackgroundColor3 = P.border
+    hs1.BorderSizePixel = 0
+    hs1.Parent = header
 
+    local hs2 = Instance.new("Frame")
+    hs2.Size = UDim2.new(1, 0, 0, 1)
+    hs2.Position = UDim2.new(0, 0, 1, -1)
+    hs2.BackgroundColor3 = P.border_hi
+    hs2.BorderSizePixel = 0
+    hs2.Parent = header
+
+    -- Пиксельный бейдж — три вертикальные полосы
     local badge = Instance.new("Frame")
-    badge.Size = UDim2.new(0, 22, 0, 22)
-    badge.Position = UDim2.new(0, 8, 0.5, -11)
-    badge.BackgroundColor3 = C.input
-    badge.BorderSizePixel = 1
-    badge.BorderColor3 = C.border
+    badge.Size = UDim2.new(0, 20, 0, 20)
+    badge.Position = UDim2.new(0, 8, 0.5, -10)
+    badge.BackgroundColor3 = P.panel
+    badge.BorderSizePixel = 0
     badge.Parent = header
 
-    local bar_specs = {
-        {x = 5, h = 12, y = -6},
-        {x = 10, h = 8, y = -4},
-        {x = 15, h = 4, y = -2},
-    }
-    for _, s in ipairs(bar_specs) do
+    local badge_border = Instance.new("Frame")
+    badge_border.Size = UDim2.new(1, 2, 1, 2)
+    badge_border.Position = UDim2.new(0, -1, 0, -1)
+    badge_border.BackgroundTransparency = 1
+    badge_border.BorderSizePixel = 1
+    badge_border.BorderColor3 = P.border
+    badge_border.Parent = badge
+
+    for i = 1, 3 do
         local bar = Instance.new("Frame")
-        bar.Size = UDim2.new(0, 2, 0, s.h)
-        bar.Position = UDim2.new(0, s.x, 0.5, s.y)
-        bar.BackgroundColor3 = C.accent
+        bar.Size = UDim2.new(0, 2, 0, 4 + i * 3)
+        bar.Position = UDim2.new(0, 3 + (i - 1) * 5, 1, -3)
+        bar.BackgroundColor3 = P.accent
         bar.BorderSizePixel = 0
         bar.Parent = badge
     end
 
     local title = Instance.new("TextLabel")
     title.Size = UDim2.new(0, 220, 1, 0)
-    title.Position = UDim2.new(0, 38, 0, 0)
+    title.Position = UDim2.new(0, 36, 0, 0)
     title.BackgroundTransparency = 1
     title.Text = "BYTECODE EDITOR"
-    title.TextColor3 = C.txt
+    title.TextColor3 = P.txt
     title.Font = Enum.Font.Code
     title.TextSize = 12
     title.TextXAlignment = Enum.TextXAlignment.Left
@@ -557,42 +648,57 @@ function M.start()
     header_info.Position = UDim2.new(0, 200, 0, 0)
     header_info.BackgroundTransparency = 1
     header_info.Text = ""
-    header_info.TextColor3 = C.dim
+    header_info.TextColor3 = P.dim
     header_info.Font = Enum.Font.Code
     header_info.TextSize = 11
     header_info.TextXAlignment = Enum.TextXAlignment.Left
     header_info.Parent = header
 
+    -- Статусный светодиод — пиксельный квадрат
+    local dot_outer = Instance.new("Frame")
+    dot_outer.Size = UDim2.new(0, 12, 0, 12)
+    dot_outer.Position = UDim2.new(1, -22, 0.5, -6)
+    dot_outer.BackgroundColor3 = P.border
+    dot_outer.BorderSizePixel = 0
+    dot_outer.Parent = header
+
     status_dot = Instance.new("Frame")
-    status_dot.Size = UDim2.new(0, 8, 0, 8)
-    status_dot.Position = UDim2.new(1, -20, 0.5, -4)
-    status_dot.BackgroundColor3 = C.dim
+    status_dot.Size = UDim2.new(1, -2, 1, -2)
+    status_dot.Position = UDim2.new(0, 1, 0, 1)
+    status_dot.BackgroundColor3 = P.hint
     status_dot.BorderSizePixel = 0
-    status_dot.Parent = header
-    local dot_corner = Instance.new("UICorner")
-    dot_corner.CornerRadius = UDim.new(1, 0)
-    dot_corner.Parent = status_dot
+    status_dot.Parent = dot_outer
 
     drag_begin(header)
 
     --========================
     -- LEFT PANE (HEX)
     --========================
+    local gap = 4
+    local half_w = (PANEL_W - gap * 3) / 2
+
     left_pane = Instance.new("Frame")
-    left_pane.Size = UDim2.new(0.5, -8, 0, BODY_H)
-    left_pane.Position = UDim2.new(0, 4, 0, BODY_Y)
-    left_pane.BackgroundColor3 = C.input
-    left_pane.BorderSizePixel = 1
-    left_pane.BorderColor3 = C.border
+    left_pane.Size = UDim2.new(0, half_w, 0, BODY_H - 2)
+    left_pane.Position = UDim2.new(0, gap, 0, BODY_Y + 1)
+    left_pane.BackgroundColor3 = P.panel
+    left_pane.BorderSizePixel = 0
     left_pane.ClipsDescendants = true
-    left_pane.Parent = bp
+    left_pane.Parent = body
+
+    local lb = Instance.new("Frame")
+    lb.Size = UDim2.new(1, 2, 1, 2)
+    lb.Position = UDim2.new(0, -1, 0, -1)
+    lb.BackgroundTransparency = 1
+    lb.BorderSizePixel = 1
+    lb.BorderColor3 = P.border
+    lb.Parent = left_pane
 
     local left_head = Instance.new("TextLabel")
-    left_head.Size = UDim2.new(1, 0, 0, 20)
-    left_head.BackgroundColor3 = C.bar
+    left_head.Size = UDim2.new(1, 0, 0, 18)
+    left_head.BackgroundColor3 = P.header
     left_head.BorderSizePixel = 0
     left_head.Text = "  HEX"
-    left_head.TextColor3 = C.dim
+    left_head.TextColor3 = P.dim
     left_head.Font = Enum.Font.Code
     left_head.TextSize = 10
     left_head.TextXAlignment = Enum.TextXAlignment.Left
@@ -600,18 +706,18 @@ function M.start()
 
     local left_sep = Instance.new("Frame")
     left_sep.Size = UDim2.new(1, 0, 0, 1)
-    left_sep.Position = UDim2.new(0, 0, 0, 19)
-    left_sep.BackgroundColor3 = C.border
+    left_sep.Position = UDim2.new(0, 0, 0, 17)
+    left_sep.BackgroundColor3 = P.border
     left_sep.BorderSizePixel = 0
     left_sep.Parent = left_pane
 
     left_scroll = Instance.new("ScrollingFrame")
-    left_scroll.Size = UDim2.new(1, 0, 1, -20)
-    left_scroll.Position = UDim2.new(0, 0, 0, 20)
+    left_scroll.Size = UDim2.new(1, 0, 1, -18)
+    left_scroll.Position = UDim2.new(0, 0, 0, 18)
     left_scroll.BackgroundTransparency = 1
     left_scroll.BorderSizePixel = 0
     left_scroll.ScrollBarThickness = 3
-    left_scroll.ScrollBarImageColor3 = C.border
+    left_scroll.ScrollBarImageColor3 = P.border
     left_scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
     left_scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
     left_scroll.Parent = left_pane
@@ -630,20 +736,27 @@ function M.start()
     -- RIGHT PANE (SOURCE)
     --========================
     right_pane = Instance.new("Frame")
-    right_pane.Size = UDim2.new(0.5, -8, 0, BODY_H)
-    right_pane.Position = UDim2.new(0.5, 4, 0, BODY_Y)
-    right_pane.BackgroundColor3 = C.input
-    right_pane.BorderSizePixel = 1
-    right_pane.BorderColor3 = C.border
+    right_pane.Size = UDim2.new(0, half_w, 0, BODY_H - 2)
+    right_pane.Position = UDim2.new(0, gap * 2 + half_w, 0, BODY_Y + 1)
+    right_pane.BackgroundColor3 = P.panel
+    right_pane.BorderSizePixel = 0
     right_pane.ClipsDescendants = true
-    right_pane.Parent = bp
+    right_pane.Parent = body
+
+    local rb = Instance.new("Frame")
+    rb.Size = UDim2.new(1, 2, 1, 2)
+    rb.Position = UDim2.new(0, -1, 0, -1)
+    rb.BackgroundTransparency = 1
+    rb.BorderSizePixel = 1
+    rb.BorderColor3 = P.border
+    rb.Parent = right_pane
 
     local right_head = Instance.new("TextLabel")
-    right_head.Size = UDim2.new(1, 0, 0, 20)
-    right_head.BackgroundColor3 = C.bar
+    right_head.Size = UDim2.new(1, 0, 0, 18)
+    right_head.BackgroundColor3 = P.header
     right_head.BorderSizePixel = 0
     right_head.Text = "  SOURCE"
-    right_head.TextColor3 = C.dim
+    right_head.TextColor3 = P.dim
     right_head.Font = Enum.Font.Code
     right_head.TextSize = 10
     right_head.TextXAlignment = Enum.TextXAlignment.Left
@@ -651,14 +764,15 @@ function M.start()
 
     local right_sep = Instance.new("Frame")
     right_sep.Size = UDim2.new(1, 0, 0, 1)
-    right_sep.Position = UDim2.new(0, 0, 0, 19)
-    right_sep.BackgroundColor3 = C.border
+    right_sep.Position = UDim2.new(0, 0, 0, 17)
+    right_sep.BackgroundColor3 = P.border
     right_sep.BorderSizePixel = 0
     right_sep.Parent = right_pane
 
+    -- VIEW
     right_view_frame = Instance.new("Frame")
-    right_view_frame.Size = UDim2.new(1, 0, 1, -20)
-    right_view_frame.Position = UDim2.new(0, 0, 0, 20)
+    right_view_frame.Size = UDim2.new(1, 0, 1, -18)
+    right_view_frame.Position = UDim2.new(0, 0, 0, 18)
     right_view_frame.BackgroundTransparency = 1
     right_view_frame.BorderSizePixel = 0
     right_view_frame.Parent = right_pane
@@ -668,7 +782,7 @@ function M.start()
     right_view_scroll.BackgroundTransparency = 1
     right_view_scroll.BorderSizePixel = 0
     right_view_scroll.ScrollBarThickness = 3
-    right_view_scroll.ScrollBarImageColor3 = C.border
+    right_view_scroll.ScrollBarImageColor3 = P.border
     right_view_scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
     right_view_scroll.AutomaticCanvasSize = Enum.AutomaticSize.XY
     right_view_scroll.ScrollingDirection = Enum.ScrollingDirection.XY
@@ -680,7 +794,7 @@ function M.start()
     right_view_content.BackgroundTransparency = 1
     right_view_content.RichText = true
     right_view_content.Text = ""
-    right_view_content.TextColor3 = C.txt
+    right_view_content.TextColor3 = P.txt
     right_view_content.TextXAlignment = Enum.TextXAlignment.Left
     right_view_content.TextYAlignment = Enum.TextYAlignment.Top
     right_view_content.Font = Enum.Font.Code
@@ -689,9 +803,10 @@ function M.start()
     right_view_content.AutomaticSize = Enum.AutomaticSize.XY
     right_view_content.Parent = right_view_scroll
 
+    -- EDIT — overlay: снизу подсвеченный RichText, сверху невидимый TextBox
     right_edit_frame = Instance.new("Frame")
-    right_edit_frame.Size = UDim2.new(1, 0, 1, -20)
-    right_edit_frame.Position = UDim2.new(0, 0, 0, 20)
+    right_edit_frame.Size = UDim2.new(1, 0, 1, -18)
+    right_edit_frame.Position = UDim2.new(0, 0, 0, 18)
     right_edit_frame.BackgroundTransparency = 1
     right_edit_frame.BorderSizePixel = 0
     right_edit_frame.Visible = false
@@ -702,20 +817,37 @@ function M.start()
     right_edit_scroll.BackgroundTransparency = 1
     right_edit_scroll.BorderSizePixel = 0
     right_edit_scroll.ScrollBarThickness = 3
-    right_edit_scroll.ScrollBarImageColor3 = C.border
+    right_edit_scroll.ScrollBarImageColor3 = P.border
     right_edit_scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
     right_edit_scroll.AutomaticCanvasSize = Enum.AutomaticSize.XY
     right_edit_scroll.ScrollingDirection = Enum.ScrollingDirection.XY
     right_edit_scroll.Parent = right_edit_frame
 
+    -- Подсвеченный текст (фон)
+    right_edit_display = Instance.new("TextLabel")
+    right_edit_display.Size = UDim2.new(0, 0, 0, 0)
+    right_edit_display.Position = UDim2.new(0, 8, 0, 4)
+    right_edit_display.BackgroundTransparency = 1
+    right_edit_display.RichText = true
+    right_edit_display.Text = ""
+    right_edit_display.TextColor3 = P.txt
+    right_edit_display.TextXAlignment = Enum.TextXAlignment.Left
+    right_edit_display.TextYAlignment = Enum.TextYAlignment.Top
+    right_edit_display.Font = Enum.Font.Code
+    right_edit_display.TextSize = 13
+    right_edit_display.TextWrapped = false
+    right_edit_display.AutomaticSize = Enum.AutomaticSize.XY
+    right_edit_display.ZIndex = 1
+    right_edit_display.Parent = right_edit_scroll
+
+    -- Невидимый TextBox — ловит ввод
     right_edit_box = Instance.new("TextBox")
-    right_edit_box.Size = UDim2.new(0, 300, 0, 40)
+    right_edit_box.Size = UDim2.new(0, 0, 0, 0)
     right_edit_box.Position = UDim2.new(0, 8, 0, 4)
     right_edit_box.BackgroundTransparency = 1
     right_edit_box.Text = ""
-    right_edit_box.TextColor3 = C.txt
-    right_edit_box.PlaceholderText = ""
-    right_edit_box.PlaceholderColor3 = C.dim
+    right_edit_box.TextColor3 = P.panel
+    right_edit_box.TextTransparency = 1
     right_edit_box.TextXAlignment = Enum.TextXAlignment.Left
     right_edit_box.TextYAlignment = Enum.TextYAlignment.Top
     right_edit_box.Font = Enum.Font.Code
@@ -724,11 +856,13 @@ function M.start()
     right_edit_box.MultiLine = true
     right_edit_box.ClearTextOnFocus = false
     right_edit_box.AutomaticSize = Enum.AutomaticSize.XY
+    right_edit_box.ZIndex = 2
     right_edit_box.Parent = right_edit_scroll
 
     right_edit_box:GetPropertyChangedSignal("Text"):Connect(function()
         if loading_edit then return end
         is_dirty = true
+        refresh_edit_display()
         update_header()
     end)
 
@@ -738,23 +872,38 @@ function M.start()
     footer = Instance.new("Frame")
     footer.Size = UDim2.new(1, 0, 0, FOOTER_H)
     footer.Position = UDim2.new(0, 0, 1, -FOOTER_H)
-    footer.BackgroundColor3 = C.bar
+    footer.BackgroundColor3 = P.header
     footer.BorderSizePixel = 0
-    footer.Parent = bp
+    footer.Parent = body
 
-    local foot_sep = Instance.new("Frame")
-    foot_sep.Size = UDim2.new(1, 0, 0, 1)
-    foot_sep.Position = UDim2.new(0, 0, 0, 0)
-    foot_sep.BackgroundColor3 = C.border
-    foot_sep.BorderSizePixel = 0
-    foot_sep.Parent = footer
+    local fs1 = Instance.new("Frame")
+    fs1.Size = UDim2.new(1, 0, 0, 1)
+    fs1.Position = UDim2.new(0, 0, 0, 0)
+    fs1.BackgroundColor3 = P.border_hi
+    fs1.BorderSizePixel = 0
+    fs1.Parent = footer
 
-    btn_decompile = mk_button(footer, "DECOMPILE", 96, 8, 0, C.accent)
-    btn_edit = mk_button(footer, "EDIT", 70, 110, 0, C.txt)
-    btn_revert = mk_button(footer, "REVERT", 76, 186, 0, C.warn)
+    local fs2 = Instance.new("Frame")
+    fs2.Size = UDim2.new(1, 0, 0, 1)
+    fs2.Position = UDim2.new(0, 0, 0, 1)
+    fs2.BackgroundColor3 = P.border
+    fs2.BorderSizePixel = 0
+    fs2.Parent = footer
 
-    btn_exit = mk_button(footer, "EXIT", 60, PANEL_W - 140, 0, C.err)
-    btn_save = mk_button(footer, "SAVE", 72, PANEL_W - 76, 0, C.dim)
+    local _, btn_dec_outer = mk_button(footer, "DECOMPILE", 96, 8, P.accent)
+    btn_decompile = btn_dec_outer:FindFirstChildOfClass("TextButton")
+
+    local _, btn_edit_outer = mk_button(footer, "EDIT", 70, 110, P.txt)
+    btn_edit = btn_edit_outer:FindFirstChildOfClass("TextButton")
+
+    local _, btn_rev_outer = mk_button(footer, "REVERT", 76, 186, P.warn)
+    btn_revert = btn_rev_outer:FindFirstChildOfClass("TextButton")
+
+    local _, btn_exit_outer = mk_button(footer, "EXIT", 60, PANEL_W - 140, P.err)
+    btn_exit = btn_exit_outer:FindFirstChildOfClass("TextButton")
+
+    local _, btn_save_outer = mk_button(footer, "SAVE", 72, PANEL_W - 76, P.dim)
+    btn_save = btn_save_outer:FindFirstChildOfClass("TextButton")
 
     --========================
     -- EVENTS
@@ -764,7 +913,7 @@ function M.start()
         cached_src = nil
         cached_for_bytecode = nil
         M.render_all()
-        console.log("re-decompiled via D1", C.accent)
+        console.log("re-decompiled via D1", P.accent)
     end)
 
     btn_edit.MouseButton1Click:Connect(function()
@@ -778,7 +927,7 @@ function M.start()
     btn_revert.MouseButton1Click:Connect(revert_all)
 
     btn_exit.MouseButton1Click:Connect(function()
-        bp.Visible = false
+        outer.Visible = false
     end)
 
     btn_save.MouseButton1Click:Connect(do_save)
