@@ -452,6 +452,10 @@ function M.start(bc)
         t:Create(panel, info, {Size = min and UDim2.new(1, 0, 0, 0) or UDim2.new(1, 0, 0, 200)}):Play()
     end)
 
+    --=========================================================
+    -- КОМАНДЫ
+    --=========================================================
+
     M.register("help", function()
         M.log("commands:", C.accent)
         local names = {}
@@ -517,12 +521,16 @@ function M.start(bc)
     end, "hide editor window")
 
     M.register("apply", function()
-        if BC.modules.patch and BC.modules.patch.do_apply then BC.modules.patch.do_apply() end
-    end, "apply changes via D1")
+        if BC.modules.patch and BC.modules.patch.do_apply then
+            BC.modules.patch.do_apply()
+        end
+    end, "apply changes to live game")
 
     M.register("revert", function()
-        if BC.modules.patch and BC.modules.patch.revert then BC.modules.patch.revert() end
-    end, "restore original")
+        if BC.modules.patch and BC.modules.patch.revert then
+            BC.modules.patch.revert()
+        end
+    end, "revert all hooks")
 
     M.register("findnum", function(a)
         if BC.modules.patch and BC.modules.patch.findnum_cmd then
