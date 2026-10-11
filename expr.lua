@@ -27,7 +27,6 @@ local PURE = {
     CONCAT = true, NOT = true, MINUS = true, LENGTH = true,
 }
 
--- CALL/CALLFB можно инлайнить только при одном использовании (side effect)
 local SINGLE_USE_INLINE = { CALL = true, CALLFB = true }
 
 local BINOP_PREC = {
@@ -66,7 +65,7 @@ local function cstr(proto, i)
     return "?"
 end
 
-local function render_def(ins, proto, ssa_data, read_fn, depth)
+local function render_def(ins, proto, ssa_data, read_fn, depth, ins_at)
     if depth > 10 then return nil end
     local n = ins.name
 
@@ -182,6 +181,41 @@ local function render_def(ins, proto, ssa_data, read_fn, depth)
     if n == "CALL" or n == "CALLFB" then
         local nres = ins.c - 1
         if nres ~= 1 then return nil end
+
+        -- NAMECALL-паттерн: R_a - функция, определяется NAMECALL R_a R_b <key>
+        local fn_ver = ssa_data and ssa_data.read_at and ssa_data.read_at[ins.word_idx]
+        fn_ver = fn_ver and fn_ver[ins.a]
+        local namcall_ins = nil
+        if fn_ver and ssa_data.versions[fn_ver] and ssa_data.versions[fn_ver].def_pc then
+            local d_pc = ssa_data.versions[fn_ver].def_pc
+            if d_pc and d_pc >= 0 and ins_at[d_pc] then
+                local cand = ins_at[d_pc]
+                if cand.name == "NAMECALL" then
+                    namcall_ins = cand
+                end
+            end
+        end
+
+        if namcall_ins then
+            local self_r = read_fn(namcall_ins.b, depth + 1)
+            if not self_r then return nil end
+            local key_c = proto and proto.constants and proto.constants[(namcall_ins.aux or 0) + 1]
+            local kn = key_c and key_c.value or "?"
+            local nargs = ins.b - 1
+            local args = {}
+            -- первый аргумент CALL - это self, начиная со второго - реальные args
+            for i = 2, nargs do
+                local a = read_fn(ins.a + i, depth + 1)
+                if not a then return nil end
+                args[#args + 1] = a.code
+            end
+            return {
+                code = self_r.code .. ":" .. tostring(kn) .. "(" .. table.concat(args, ", ") .. ")",
+                prec = PREC.PRIMARY,
+            }
+        end
+
+        -- обычный вызов
         local f = read_fn(ins.a, depth + 1)
         if not f then return nil end
         local nargs = ins.b - 1
@@ -217,16 +251,12 @@ function M.build(ssa_data, proto, instrs)
     local inlineable = {}
     for id, v in pairs(ssa_data.versions) do
         local ok = false
-        if v.kind == "param" then
-            ok = false
-        elseif v.kind == "temp" or v.kind == "value" then
+        if v.kind ~= "param" and (v.kind == "temp" or v.kind == "value") then
             if v.def_pc and v.def_pc >= 0 then
                 local def_ins = ins_at[v.def_pc]
                 if def_ins then
                     if PURE[def_ins.name] then
-                        if use_count[id] <= 1 then
-                            ok = true
-                        elseif use_count[id] == 2 then
+                        if use_count[id] <= 2 then
                             ok = true
                         end
                     elseif SINGLE_USE_INLINE[def_ins.name] then
@@ -265,11 +295,11 @@ function M.build(ssa_data, proto, instrs)
             return {code = ssa_data.name_of[version_id] or ("t" .. version_id), prec = PREC.PRIMARY}
         end
         in_progress[version_id] = true
+        local rad = ssa_data.read_at[def_ins.word_idx]
         local res = render_def(def_ins, proto, ssa_data, function(r, d)
-            local rad = ssa_data.read_at[def_ins.word_idx]
             local rid = rad and rad[r]
             return get_read(r, d, rid)
-        end, depth or 0)
+        end, depth or 0, ins_at)
         in_progress[version_id] = nil
         if res then expr_of[version_id] = res end
         return res or {code = ssa_data.name_of[version_id] or ("t" .. version_id), prec = PREC.PRIMARY}
@@ -283,7 +313,7 @@ function M.build(ssa_data, proto, instrs)
                 local res = render_def(def_ins, proto, ssa_data, function(r, d)
                     local rid = rad and rad[r]
                     return get_read(r, d, rid)
-                end, 0)
+                end, 0, ins_at)
                 if res then expr_of[id] = res end
             end
         end
