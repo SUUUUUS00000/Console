@@ -1,13 +1,6 @@
 local M = {}
 M.name = "varflow"
 
--- Классификация регистров на основе numparams и maxstack.
--- На этом этапе без полного анализа потока данных:
---   param - регистр параметра функции
---   temp  - регистр временного значения
--- Когда добавим восстановление локальных переменных (используя locvars из отладки
--- или анализ defs/uses), здесь появятся категории local и dead.
-
 function M.classify(proto, instrs)
     local info = {
         nparams = proto.numparams or 0,
@@ -18,19 +11,12 @@ function M.classify(proto, instrs)
     for i = 0, info.maxstack - 1 do
         local kind = "temp"
         if i < info.nparams then kind = "param" end
-        info.regs[i] = {
-            kind = kind,
-            defs = {},
-            uses = {},
-        }
+        info.regs[i] = { kind = kind, defs = {}, uses = {} }
     end
 
-    -- Лёгкий обход: помечаем где регистр пишется и где читается.
-    -- Полноценные границы жизни (web) пока не считаем.
     for _, ins in ipairs(instrs) do
         local n = ins.name
 
-        -- приёмники
         if n == "LOADNIL" or n == "LOADB" or n == "LOADN" or n == "LOADK" or n == "LOADKX"
             or n == "MOVE" or n == "GETGLOBAL" or n == "GETUPVAL" or n == "GETIMPORT"
             or n == "GETTABLE" or n == "GETTABLEKS" or n == "GETTABLEN" or n == "GETUDATAKS"
@@ -66,7 +52,6 @@ function M.classify(proto, instrs)
             end
         end
 
-        -- источники
         local sources = {}
         if n == "MOVE" or n == "NOT" or n == "MINUS" or n == "LENGTH" then
             sources[#sources + 1] = ins.b
@@ -117,7 +102,6 @@ function M.classify(proto, instrs)
         end
     end
 
-    -- категоризация на основе количества defs
     for reg, r in pairs(info.regs) do
         if r.kind == "temp" and #r.defs >= 2 then
             r.kind = "local_candidate"
@@ -128,7 +112,6 @@ function M.classify(proto, instrs)
 end
 
 function M.init(bc)
-    -- без зависимостей
 end
 
 return M
