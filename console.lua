@@ -21,7 +21,7 @@ local C = {
     hex    = Color3.fromRGB(170, 170, 170),
 }
 
-local MAX_LOG = 500
+local MAX_LOG = 2000
 local logCount = 0
 local min = false
 local dragOn, dragStart, dragPos, dragFrame
@@ -203,7 +203,7 @@ function M.start(bc)
     hl.Size = UDim2.new(1, -12, 1, 0)
     hl.Position = UDim2.new(0, 6, 0, 0)
     hl.BackgroundTransparency = 1
-    hl.Text = "help load scripts held edit apply revert gui src proto close clear"
+    hl.Text = "help load scripts held edit apply revert gui src srcall proto close clear"
     hl.TextColor3 = C.hint
     hl.Font = Enum.Font.Code
     hl.TextSize = 11
@@ -254,7 +254,6 @@ function M.start(bc)
         t:Create(panel, info, {Size = min and UDim2.new(1, 0, 0, 0) or UDim2.new(1, 0, 0, 180)}):Play()
     end)
 
-    -- Базовые команды
     M.register("help", function()
         M.log("commands:", C.accent)
         local names = {}
@@ -325,6 +324,21 @@ function M.start(bc)
             end
         end
     end, "show decompiled source of current proto")
+
+    M.register("srcall", function()
+        if BC.modules.patch and BC.modules.patch.decompile_full then
+            local src, err = BC.modules.patch.decompile_full()
+            if not src then
+                M.log("decompile failed: " .. tostring(err), C.err)
+            else
+                M.log("--- FULL SCRIPT (" .. #src .. " bytes) ---", C.accent)
+                for line in src:gmatch("[^\n]+") do
+                    M.log(line, C.txt)
+                end
+                M.log("--- END ---", C.accent)
+            end
+        end
+    end, "show decompiled full script")
 
     M.register("edit", function(a)
         if BC.modules.patch and BC.modules.patch.edit_cmd then
