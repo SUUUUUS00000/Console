@@ -11,6 +11,7 @@ local MODULES = {
     "ssa",
     "expr",
     "cfgs",
+    "decompile",
     "patch",
     "panel",
 }
