@@ -1,39 +1,30 @@
 local M = {}
 M.name = "names"
 
--- Возвращает карту reg -> display_name для прототипа.
--- Без отладочной информации единственная надёжная разметка:
---   регистры 0..numparams-1 - параметры   -> arg1, arg2, arg3
---   остальные                - временные  -> v1, v2, v3, ...
--- Имена стабильны: один регистр всегда получает одно и то же имя внутри функции.
-
 function M.for_proto(proto, instrs)
-    local names = {}
+    local reg_names = {}
     local nparams = proto.numparams or 0
     local maxreg = proto.maxstack or 20
     if maxreg < nparams then maxreg = nparams end
     if maxreg < 1 then maxreg = 1 end
 
     for i = 0, nparams - 1 do
-        names[i] = "arg" .. (i + 1)
+        reg_names[i] = "arg" .. (i + 1)
     end
 
     local counter = 1
     for i = nparams, maxreg - 1 do
-        names[i] = "v" .. counter
+        reg_names[i] = "v" .. counter
         counter = counter + 1
     end
 
-    return names
+    return reg_names
 end
 
--- Быстрая проверка: используется ли имя регистра где-либо в списке инструкций.
--- Нужно, чтобы не плодить vN для регистров, которых реально нет.
 function M.used_regs(instrs)
     local used = {}
     for _, ins in ipairs(instrs) do
         local n = ins.name
-        -- приёмник
         if n == "CALL" or n == "CALLFB" then
             local c = (ins.c or 1) - 1
             if c > 0 then
@@ -55,18 +46,19 @@ function M.used_regs(instrs)
             for k = 3, 3 + cnt do used[ins.a + k] = true end
         elseif n == "FORGPREP" or n == "FORGPREP_INEXT" or n == "FORGPREP_NEXT" then
             for k = 0, 2 do used[ins.a + k] = true end
-        elseif n == "NEWTABLE" or n == "DUPTABLE" or n == "NEWCLOSURE" or n == "DUPCLOSURE"
-            or n == "LOADNIL" or n == "LOADB" or n == "LOADN" or n == "LOADK" or n == "LOADKX"
+        elseif n == "LOADNIL" or n == "LOADB" or n == "LOADN" or n == "LOADK" or n == "LOADKX"
             or n == "MOVE" or n == "GETGLOBAL" or n == "GETUPVAL" or n == "GETIMPORT"
             or n == "GETTABLE" or n == "GETTABLEKS" or n == "GETTABLEN" or n == "GETUDATAKS"
             or n == "ADD" or n == "SUB" or n == "MUL" or n == "DIV" or n == "IDIV" or n == "MOD"
             or n == "POW" or n == "ADDK" or n == "SUBK" or n == "MULK" or n == "DIVK"
             or n == "IDIVK" or n == "MODK" or n == "POWK" or n == "SUBRK" or n == "DIVRK"
             or n == "AND" or n == "OR" or n == "ANDK" or n == "ORK"
-            or n == "CONCAT" or n == "NOT" or n == "MINUS" or n == "LENGTH" then
+            or n == "CONCAT" or n == "NOT" or n == "MINUS" or n == "LENGTH"
+            or n == "NEWTABLE" or n == "DUPTABLE" or n == "NEWCLOSURE" or n == "DUPCLOSURE"
+            or n == "NEWCLASS" then
             used[ins.a] = true
         end
-        -- источники
+
         if n == "MOVE" or n == "NOT" or n == "MINUS" or n == "LENGTH" then
             used[ins.b] = true
         elseif n == "GETTABLE" or n == "SETTABLE" then
@@ -114,7 +106,6 @@ function M.used_regs(instrs)
 end
 
 function M.init(bc)
-    -- без зависимостей
 end
 
 return M
