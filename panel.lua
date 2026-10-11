@@ -2,7 +2,7 @@ local M = {}
 M.name = "panel"
 
 local BC
-local console, parser, disasm, patch
+local console, parser, disasm, cfgs, patch
 
 local C
 local gui_root
@@ -149,7 +149,7 @@ local function render_hex()
     end
 end
 
-local function make_edit_row(ins, current_value, proto, labels, on_change)
+local function make_edit_row(ins, current_value, proto, labels, indent, on_change)
     local row = Instance.new("Frame")
     row.Size = UDim2.new(1, 0, 0, 22)
     row.BackgroundTransparency = 1
@@ -158,7 +158,8 @@ local function make_edit_row(ins, current_value, proto, labels, on_change)
     local lbl = Instance.new("TextLabel")
     lbl.Size = UDim2.new(1, -90, 1, 0)
     lbl.BackgroundTransparency = 1
-    lbl.Text = string.format("%06X  %s", ins.byte_offset, disasm.fmt(ins, proto, labels))
+    lbl.Text = string.rep("  ", indent) .. string.format("%06X  %s",
+        ins.byte_offset, disasm.fmt(ins, proto, labels))
     local col = C.txt
     if ins.name == "LOADN" or ins.name == "LOADK" then
         col = C.warn
@@ -208,7 +209,7 @@ local function make_edit_row(ins, current_value, proto, labels, on_change)
     table.insert(dis_lines, {f = row, byte_offset = ins.byte_offset, ins = ins})
 end
 
-local function make_read_row(ins, proto, labels)
+local function make_read_row(ins, proto, labels, indent)
     local row = Instance.new("Frame")
     row.Size = UDim2.new(1, 0, 0, 18)
     row.BackgroundTransparency = 1
@@ -217,7 +218,8 @@ local function make_read_row(ins, proto, labels)
     local lbl = Instance.new("TextLabel")
     lbl.Size = UDim2.new(1, 0, 1, 0)
     lbl.BackgroundTransparency = 1
-    lbl.Text = string.format("%06X  %s", ins.byte_offset, disasm.fmt(ins, proto, labels))
+    lbl.Text = string.rep("  ", indent) .. string.format("%06X  %s",
+        ins.byte_offset, disasm.fmt(ins, proto, labels))
     local col = C.txt
     if ins.name == "LOADN" or ins.name == "LOADK" then
         col = C.warn
@@ -244,7 +246,7 @@ local function make_read_row(ins, proto, labels)
     table.insert(dis_lines, {f = row, byte_offset = ins.byte_offset, ins = ins})
 end
 
-local function make_label_row(text, byte_offset)
+local function make_label_row(text, byte_offset, indent_level)
     local row = Instance.new("Frame")
     row.Size = UDim2.new(1, 0, 0, 18)
     row.BackgroundTransparency = 1
@@ -253,8 +255,25 @@ local function make_label_row(text, byte_offset)
     local lbl = Instance.new("TextLabel")
     lbl.Size = UDim2.new(1, 0, 1, 0)
     lbl.BackgroundTransparency = 1
-    lbl.Text = "       " .. text
+    lbl.Text = string.rep("  ", indent_level or 0) .. text .. ":"
     lbl.TextColor3 = C.accent
+    lbl.Font = Enum.Font.Code
+    lbl.TextSize = 12
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Parent = row
+end
+
+local function make_end_row(text, indent_level)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, 18)
+    row.BackgroundTransparency = 1
+    row.Parent = bpRightScroll
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, 0, 1, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = string.rep("  ", indent_level or 0) .. "end: " .. text
+    lbl.TextColor3 = C.dim
     lbl.Font = Enum.Font.Code
     lbl.TextSize = 12
     lbl.TextXAlignment = Enum.TextXAlignment.Left
@@ -275,33 +294,46 @@ local function render_dis()
         e.Parent = bpRightScroll
         return
     end
+
     local proto = st.parsed.protos[st.proto_idx]
-    local labels = disasm.collect_labels(st.instrs)
+    local analysis = cfgs.analyze(st.instrs)
+    local labels = analysis.labels
+    local ends = analysis.ends
+    local indents = analysis.indents
 
     for _, ins in ipairs(st.instrs) do
-        if labels[ins.word_idx] then
-            make_label_row(labels[ins.word_idx] .. ":", ins.byte_offset)
+        local pc = ins.word_idx
+        local indent = indents[pc] or 0
+
+        if ends[pc] then
+            for _, txt in ipairs(ends[pc]) do
+                make_end_row(txt, indent)
+            end
+        end
+
+        if labels[pc] then
+            make_label_row(labels[pc], ins.byte_offset, indent)
         end
 
         if ins.name == "LOADN" then
-            make_edit_row(ins, ins.d, proto, labels, function(v)
+            make_edit_row(ins, ins.d, proto, labels, indent, function(v)
                 patch.apply_edit_loadn(ins, v)
             end)
         elseif ins.name == "LOADB" then
-            make_edit_row(ins, ins.b, proto, labels, function(v)
+            make_edit_row(ins, ins.b, proto, labels, indent, function(v)
                 patch.apply_edit_loadb(ins, v ~= 0)
             end)
         elseif ins.name == "LOADK" then
             local c = proto.constants[ins.d + 1]
             if c and c.kind == 2 and type(c.value) == "number" then
-                make_edit_row(ins, c.value, proto, labels, function(v)
+                make_edit_row(ins, c.value, proto, labels, indent, function(v)
                     patch.apply_edit_loadk(ins, v)
                 end)
             else
-                make_read_row(ins, proto, labels)
+                make_read_row(ins, proto, labels, indent)
             end
         else
-            make_read_row(ins, proto, labels)
+            make_read_row(ins, proto, labels, indent)
         end
     end
 
@@ -523,6 +555,7 @@ function M.init(bc)
     console = bc.modules.console
     parser = bc.modules.parser
     disasm = bc.modules.disasm
+    cfgs = bc.modules.cfgs
     patch = bc.modules.patch
     C = console.colors()
     gui_root = console.gui_root()
