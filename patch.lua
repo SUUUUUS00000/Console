@@ -301,7 +301,6 @@ end
 
 -- =================== АНАЛИЗ ИЗМЕНЕНИЙ ===================
 
--- Извлекает все литералы (числа, строки, булевы) в порядке следования
 local function extract_literals(src)
     local list = {}
     local pattern = "'[^']*'|\"[^\"]*\"|%f[%w_]%d+%.?%d*%f[%W_]|%f[%w_]true%f[%W_]|%f[%w_]false%f[%W_]"
@@ -311,7 +310,6 @@ local function extract_literals(src)
     return list
 end
 
--- Возвращает список {old_lit=, new_lit=, index=} для изменённых литералов
 local function diff_literals(old_src, new_src)
     local old_lits = extract_literals(old_src)
     local new_lits = extract_literals(new_src)
@@ -332,7 +330,6 @@ local function diff_literals(old_src, new_src)
     return changes
 end
 
--- Извлекает из "сырого" литерала тип и значение
 local function parse_literal(tok)
     if not tok or tok == "" then return nil end
     local s = tok:match("^'(.+)'$") or tok:match('^"(.+)"$')
@@ -344,14 +341,12 @@ local function parse_literal(tok)
     return nil
 end
 
--- Ищет во всех функциях (root + nested) константу равную old_val и меняет на new_val
 local function patch_constant_all(fns, old_val, new_val)
     if typeof(debug.getconstants) ~= "function" then return 0 end
     if typeof(debug.setconstant) ~= "function" then return 0 end
     local total = 0
     for _, fn in ipairs(fns) do
         if typeof(islclosure) == "function" and not islclosure(fn) then
-            -- skip C closures
         else
             local ok, consts = pcall(debug.getconstants, fn)
             if ok and consts then
@@ -367,14 +362,12 @@ local function patch_constant_all(fns, old_val, new_val)
     return total
 end
 
--- Ищет upvalue равную old_val и меняет
 local function patch_upvalue_all(fns, old_val, new_val)
     if typeof(debug.getupvalues) ~= "function" then return 0 end
     if typeof(debug.setupvalue) ~= "function" then return 0 end
     local total = 0
     for _, fn in ipairs(fns) do
         if typeof(islclosure) == "function" and not islclosure(fn) then
-            -- skip C closures
         else
             local ok, ups = pcall(debug.getupvalues, fn)
             if ok and ups then
@@ -390,14 +383,12 @@ local function patch_upvalue_all(fns, old_val, new_val)
     return total
 end
 
--- Собирает все Luau-функции: root + все активные вложенные
 local function collect_all_functions(root_fn)
     local fns = {root_fn}
     if typeof(debug.getprotos) ~= "function" then return fns end
     local ok, protos = pcall(debug.getprotos, root_fn)
     if not ok or not protos then return fns end
     for i = 1, #protos do
-        -- пробуем получить активное замыкание через getproto(..., true)
         local ok2, actives = pcall(debug.getproto, root_fn, i, true)
         if ok2 and actives and #actives > 0 then
             for _, f in ipairs(actives) do
@@ -410,8 +401,6 @@ end
 
 -- =================== СТРАТЕГИИ ПРИМЕНЕНИЯ ===================
 
--- Стратегия A: debug.setconstant / debug.setupvalue
--- Работает точечно, без перезапуска, невидимо для islclosure
 local function strategy_debug(root_fn, changes)
     local C = console.colors()
     if #changes == 0 then return false, "no literal changes" end
@@ -425,14 +414,12 @@ local function strategy_debug(root_fn, changes)
         local ok_new, new_kind, new_val = pcall(parse_literal, ch.new_lit)
         if ok_old and ok_new and old_kind and new_kind then
             if old_kind == new_kind then
-                -- сначала ищем в константах
                 local n = patch_constant_all(fns, old_val, new_val)
                 if n > 0 then
                     applied = applied + n
                     console.log("    setconstant " .. tostring(old_val) .. " -> " ..
                         tostring(new_val) .. " (" .. n .. " place(s))", C.dim)
                 else
-                    -- потом в upvalues
                     local m = patch_upvalue_all(fns, old_val, new_val)
                     if m > 0 then
                         applied = applied + m
@@ -450,8 +437,6 @@ local function strategy_debug(root_fn, changes)
     return false, "no constants or upvalues matched"
 end
 
--- Стратегия B: hookproto по всем вложенным прототипам
--- Требует, чтобы у старого и нового замыкания совпадало число прототипов
 local function strategy_hookproto(script, root_fn, new_fn)
     local C = console.colors()
     if typeof(hookproto) ~= "function" then return false, "no hookproto" end
@@ -461,12 +446,8 @@ local function strategy_hookproto(script, root_fn, new_fn)
         return false, "no old protos"
     end
 
-    -- Создаём новый closure и заставляем его создать вложенные замыкания
-    -- через безопасный вызов в защищённом pcak
     local new_fns = collect_all_functions(new_fn)
     if #new_fns <= 1 then
-        -- если в новом замыкании нет активных вложенных, попробуем выполнить его
-        -- в sandbox-режиме, чтобы populate nested closures
         pcall(new_fn)
         new_fns = collect_all_functions(new_fn)
     end
@@ -509,7 +490,6 @@ local function strategy_hookproto(script, root_fn, new_fn)
     return true, applied
 end
 
--- Стратегия C: hookfunction + перезапуск
 local function strategy_hookfunction(script, root_fn, new_fn)
     local C = console.colors()
     if typeof(hookfunction) ~= "function" then return false, "no hookfunction" end
@@ -522,14 +502,29 @@ local function strategy_hookfunction(script, root_fn, new_fn)
     local prev = hookfunction(root_fn, final_fn)
     if not prev then return false, "hookfunction returned nil" end
 
+    -- перезапуск скрипта с защитой
+    local spawn_ok, spawn_err = pcall(function()
+        local co = coroutine.create(root_fn)
+        local ok_run, run_err = coroutine.resume(co)
+        if not ok_run then
+            error(run_err)
+        end
+        task.wait(0.05)
+        if coroutine.status(co) == "dead" then
+            return
+        end
+    end)
+    if not spawn_ok then
+        pcall(hookfunction, root_fn, prev)
+        active_hooks[script] = nil
+        return false, "runtime error after hook: " .. tostring(spawn_err)
+    end
+
     active_hooks[script] = {
         kind = "hookfunction",
         prev = prev,
         script = script,
     }
-
-    -- перезапуск скрипта
-    task.spawn(root_fn)
     return true
 end
 
@@ -547,11 +542,9 @@ function M.apply_edit(script, new_bytes)
         return false, "decompile failed"
     end
 
-    -- Компилируем новый исходник
     local new_fn, load_err = loadstring(src, "@" .. script.Name)
 
     if not new_fn then
-        -- фабрика upvalues
         local info_ok, info = pcall(debug.getinfo, root_fn)
         local nups = (info_ok and info and info.nups) or 0
         if nups > 0 then
@@ -583,7 +576,6 @@ function M.apply_edit(script, new_bytes)
         return false, "compile error: " .. tostring(load_err)
     end
 
-    -- Анализируем изменения
     local changes = {}
     if st.original_src and st.user_src then
         changes = diff_literals(st.original_src, st.user_src)
@@ -591,7 +583,6 @@ function M.apply_edit(script, new_bytes)
 
     console.log("apply: " .. #changes .. " literal change(s) detected", C.dim)
 
-    -- Стратегия A: точечные правки констант/upvalues
     if #changes > 0 and not changes.structural then
         local ok_a, info_a = strategy_debug(root_fn, changes)
         if ok_a then
@@ -603,7 +594,6 @@ function M.apply_edit(script, new_bytes)
         end
     end
 
-    -- Стратегия B: hookproto по всем вложенным прототипам
     local ok_b, info_b = strategy_hookproto(script, root_fn, new_fn)
     if ok_b then
         console.log("apply: strategy B (hookproto) applied " .. tostring(info_b) .. " protos", C.ok)
@@ -613,7 +603,6 @@ function M.apply_edit(script, new_bytes)
         console.log("apply: strategy B failed: " .. tostring(info_b), C.dim)
     end
 
-    -- Стратегия C: hookfunction + перезапуск
     local ok_c, err_c = strategy_hookfunction(script, root_fn, new_fn)
     if ok_c then
         console.log("apply: strategy C (hookfunction + respawn)", C.ok)
