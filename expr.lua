@@ -16,7 +16,6 @@ local PREC = {
     PRIMARY = 9,
 }
 
--- инструкции, чьё значение можно свободно дублировать
 local PURE = {
     LOADNIL = true, LOADB = true, LOADN = true, LOADK = true, LOADKX = true,
     MOVE = true, GETGLOBAL = true, GETUPVAL = true, GETIMPORT = true,
@@ -28,16 +27,8 @@ local PURE = {
     CONCAT = true, NOT = true, MINUS = true, LENGTH = true,
 }
 
--- инструкции, которые безопасно инлайнить (без сайд-эффектов и без многострочности)
-local INLINE_SAFE = {}
-for k in pairs(PURE) do INLINE_SAFE[k] = true end
-INLINE_SAFE.MOVE = true
-INLINE_SAFE.GETTABLE = true
-INLINE_SAFE.GETTABLEKS = true
-INLINE_SAFE.GETTABLEN = true
-INLINE_SAFE.GETGLOBAL = true
-INLINE_SAFE.GETUPVAL = true
-INLINE_SAFE.GETIMPORT = true
+-- CALL/CALLFB можно инлайнить только при одном использовании (side effect)
+local SINGLE_USE_INLINE = { CALL = true, CALLFB = true }
 
 local BINOP_PREC = {
     ADD = PREC.ADD, SUB = PREC.ADD,
@@ -45,12 +36,6 @@ local BINOP_PREC = {
     POW = PREC.POW,
     CONCAT = PREC.CONCAT,
     AND = PREC.AND, OR = PREC.OR,
-}
-
-local CMPOP = {
-    JUMPIFEQ = "==", JUMPIFNOTEQ = "~=",
-    JUMPIFLE = "<=", JUMPIFLT = "<",
-    JUMPIFNOTLE = ">", JUMPIFNOTLT = ">=",
 }
 
 local BINOP_SYM = {
@@ -81,48 +66,28 @@ local function cstr(proto, i)
     return "?"
 end
 
--- Возвращает {code=..., prec=N} для значения, определяемого в ins.
--- Если значение невыразимо — nil.
-local function render_def(ins, proto, expr_of, ssa_data, get_read, depth)
-    if depth > 8 then return nil end
-
+local function render_def(ins, proto, ssa_data, read_fn, depth)
+    if depth > 10 then return nil end
     local n = ins.name
 
-    if n == "LOADNIL" then
-        return {code = "nil", prec = PREC.PRIMARY}
-    end
-    if n == "LOADB" then
-        return {code = (ins.b ~= 0) and "true" or "false", prec = PREC.PRIMARY}
-    end
-    if n == "LOADN" then
-        return {code = tostring(ins.d), prec = PREC.PRIMARY}
-    end
-    if n == "LOADK" then
-        return {code = cstr(proto, ins.d), prec = PREC.PRIMARY}
-    end
-    if n == "LOADKX" then
-        return {code = cstr(proto, ins.aux or 0), prec = PREC.PRIMARY}
-    end
-    if n == "GETGLOBAL" then
-        return {code = cstr(proto, ins.aux or 0), prec = PREC.PRIMARY}
-    end
-    if n == "GETIMPORT" then
-        return {code = cstr(proto, ins.d), prec = PREC.PRIMARY}
-    end
-    if n == "GETUPVAL" then
-        return {code = "upval" .. ins.b, prec = PREC.PRIMARY}
-    end
-    if n == "MOVE" then
-        return get_read(ins.b, depth + 1)
-    end
+    if n == "LOADNIL" then return {code = "nil", prec = PREC.PRIMARY} end
+    if n == "LOADB" then return {code = (ins.b ~= 0) and "true" or "false", prec = PREC.PRIMARY} end
+    if n == "LOADN" then return {code = tostring(ins.d), prec = PREC.PRIMARY} end
+    if n == "LOADK" then return {code = cstr(proto, ins.d), prec = PREC.PRIMARY} end
+    if n == "LOADKX" then return {code = cstr(proto, ins.aux or 0), prec = PREC.PRIMARY} end
+    if n == "GETGLOBAL" then return {code = cstr(proto, ins.aux or 0), prec = PREC.PRIMARY} end
+    if n == "GETIMPORT" then return {code = cstr(proto, ins.d), prec = PREC.PRIMARY} end
+    if n == "GETUPVAL" then return {code = "upval" .. ins.b, prec = PREC.PRIMARY} end
+    if n == "MOVE" then return read_fn(ins.b, depth + 1) end
+
     if n == "GETTABLE" then
-        local t = get_read(ins.b, depth + 1)
-        local k = get_read(ins.c, depth + 1)
+        local t = read_fn(ins.b, depth + 1)
+        local k = read_fn(ins.c, depth + 1)
         if not t or not k then return nil end
         return {code = t.code .. "[" .. k.code .. "]", prec = PREC.PRIMARY}
     end
     if n == "GETTABLEKS" then
-        local t = get_read(ins.b, depth + 1)
+        local t = read_fn(ins.b, depth + 1)
         if not t then return nil end
         local c = proto and proto.constants and proto.constants[(ins.aux or 0) + 1]
         local kn = c and c.value
@@ -132,27 +97,27 @@ local function render_def(ins, proto, expr_of, ssa_data, get_read, depth)
         return {code = t.code .. "[" .. cstr(proto, ins.aux or 0) .. "]", prec = PREC.PRIMARY}
     end
     if n == "GETTABLEN" then
-        local t = get_read(ins.b, depth + 1)
+        local t = read_fn(ins.b, depth + 1)
         if not t then return nil end
         return {code = t.code .. "[" .. (ins.c + 1) .. "]", prec = PREC.PRIMARY}
     end
 
     if n == "NOT" then
-        local a = get_read(ins.b, depth + 1)
+        local a = read_fn(ins.b, depth + 1)
         if not a then return nil end
         local code = a.code
         if a.prec < PREC.UNARY then code = "(" .. code .. ")" end
         return {code = "not " .. code, prec = PREC.UNARY}
     end
     if n == "MINUS" then
-        local a = get_read(ins.b, depth + 1)
+        local a = read_fn(ins.b, depth + 1)
         if not a then return nil end
         local code = a.code
         if a.prec < PREC.UNARY then code = "(" .. code .. ")" end
         return {code = "-" .. code, prec = PREC.UNARY}
     end
     if n == "LENGTH" then
-        local a = get_read(ins.b, depth + 1)
+        local a = read_fn(ins.b, depth + 1)
         if not a then return nil end
         local code = a.code
         if a.prec < PREC.UNARY then code = "(" .. code .. ")" end
@@ -161,12 +126,12 @@ local function render_def(ins, proto, expr_of, ssa_data, get_read, depth)
 
     if n == "ADD" or n == "SUB" or n == "MUL" or n == "DIV" or n == "IDIV"
         or n == "MOD" or n == "POW" or n == "AND" or n == "OR" then
-        local a = get_read(ins.b, depth + 1)
-        local b = get_read(ins.c, depth + 1)
+        local a = read_fn(ins.b, depth + 1)
+        local b = read_fn(ins.c, depth + 1)
         if not a or not b then return nil end
         local prec = BINOP_PREC[n] or PREC.ADD
         local sym = BINOP_SYM[n] or "?"
-        local right_assoc = (n == "POW" or n == "CONCAT")
+        local right_assoc = (n == "POW")
         local left_min = right_assoc and (prec + 1) or prec
         local right_min = right_assoc and prec or (prec + 1)
         local lcode = a.code
@@ -178,21 +143,20 @@ local function render_def(ins, proto, expr_of, ssa_data, get_read, depth)
 
     if n == "ADDK" or n == "SUBK" or n == "MULK" or n == "DIVK" or n == "IDIVK"
         or n == "MODK" or n == "POWK" or n == "ANDK" or n == "ORK" then
-        local a = get_read(ins.b, depth + 1)
+        local a = read_fn(ins.b, depth + 1)
         if not a then return nil end
         local prec = BINOP_PREC[n] or PREC.ADD
         local sym = BINOP_SYM[n] or "?"
         local kcode = cstr(proto, ins.c)
         local right_assoc = (n == "POWK")
         local left_min = right_assoc and (prec + 1) or prec
-        local right_min = right_assoc and prec or (prec + 1)
         local lcode = a.code
         if a.prec < left_min then lcode = "(" .. lcode .. ")" end
         return {code = lcode .. " " .. sym .. " " .. kcode, prec = prec}
     end
 
     if n == "SUBRK" or n == "DIVRK" then
-        local b = get_read(ins.c, depth + 1)
+        local b = read_fn(ins.c, depth + 1)
         if not b then return nil end
         local prec = n == "SUBRK" and PREC.ADD or PREC.MUL
         local sym = n == "SUBRK" and "-" or "/"
@@ -205,7 +169,7 @@ local function render_def(ins, proto, expr_of, ssa_data, get_read, depth)
     if n == "CONCAT" then
         local parts = {}
         for i = ins.b, ins.c do
-            local r = get_read(i, depth + 1)
+            local r = read_fn(i, depth + 1)
             if not r then return nil end
             local rc = r.code
             if r.prec < PREC.CONCAT + 1 then rc = "(" .. rc .. ")" end
@@ -214,37 +178,61 @@ local function render_def(ins, proto, expr_of, ssa_data, get_read, depth)
         return {code = table.concat(parts, " .. "), prec = PREC.CONCAT}
     end
 
+    -- CALL/CALLFB: инлайним как выражение, если single-use
+    if n == "CALL" or n == "CALLFB" then
+        local nres = ins.c - 1
+        if nres ~= 1 then return nil end
+        local f = read_fn(ins.a, depth + 1)
+        if not f then return nil end
+        local nargs = ins.b - 1
+        local args = {}
+        for i = 1, nargs do
+            local a = read_fn(ins.a + i, depth + 1)
+            if not a then return nil end
+            args[#args + 1] = a.code
+        end
+        return {code = f.code .. "(" .. table.concat(args, ", ") .. ")", prec = PREC.PRIMARY}
+    end
+
     return nil
 end
 
 function M.build(ssa_data, proto, instrs)
     if not ssa_data or not ssa_data.versions then
-        return {expr_of = {}, get = function(_, _) return nil end}
+        return {
+            expr_of = {},
+            inlineable = {},
+            get = function(_, _) return nil end
+        }
     end
 
     local ins_at = {}
     for _, ins in ipairs(instrs) do ins_at[ins.word_idx] = ins end
 
-    -- Считаем, сколько раз используется каждая версия
     local use_count = {}
     for id, v in pairs(ssa_data.versions) do
         use_count[id] = #v.uses
     end
 
-    -- Определяем inlineable
     local inlineable = {}
     for id, v in pairs(ssa_data.versions) do
         local ok = false
         if v.kind == "param" then
-            ok = true
+            ok = false
         elseif v.kind == "temp" or v.kind == "value" then
             if v.def_pc and v.def_pc >= 0 then
                 local def_ins = ins_at[v.def_pc]
-                if def_ins and INLINE_SAFE[def_ins.name] then
-                    if use_count[id] <= 1 then
-                        ok = true
-                    elseif use_count[id] == 2 and PURE[def_ins.name] then
-                        ok = true
+                if def_ins then
+                    if PURE[def_ins.name] then
+                        if use_count[id] <= 1 then
+                            ok = true
+                        elseif use_count[id] == 2 then
+                            ok = true
+                        end
+                    elseif SINGLE_USE_INLINE[def_ins.name] then
+                        if use_count[id] <= 1 and v.kind == "temp" then
+                            ok = true
+                        end
                     end
                 end
             end
@@ -255,50 +243,44 @@ function M.build(ssa_data, proto, instrs)
     local expr_of = {}
     local in_progress = {}
 
-    local function get_read(reg, depth, read_version)
-        if read_version == nil then return nil end
-        local v = ssa_data.versions[read_version]
+    local function get_read(reg, depth, version_id)
+        if not version_id then return nil end
+        local v = ssa_data.versions[version_id]
         if not v then return nil end
         if v.kind == "param" then
             return {code = "arg" .. (v.reg + 1), prec = PREC.PRIMARY}
         end
-        if not inlineable[read_version] then
-            return {code = ssa_data.name_of[read_version] or ("t" .. read_version), prec = PREC.PRIMARY}
+        if not inlineable[version_id] then
+            return {code = ssa_data.name_of[version_id] or ("t" .. version_id), prec = PREC.PRIMARY}
         end
-        if expr_of[read_version] then return expr_of[read_version] end
-        if in_progress[read_version] then
-            return {code = ssa_data.name_of[read_version] or ("t" .. read_version), prec = PREC.PRIMARY}
+        if expr_of[version_id] then return expr_of[version_id] end
+        if in_progress[version_id] then
+            return {code = ssa_data.name_of[version_id] or ("t" .. version_id), prec = PREC.PRIMARY}
         end
         if not v.def_pc or v.def_pc < 0 then
-            return {code = ssa_data.name_of[read_version] or ("t" .. read_version), prec = PREC.PRIMARY}
+            return {code = ssa_data.name_of[version_id] or ("t" .. version_id), prec = PREC.PRIMARY}
         end
         local def_ins = ins_at[v.def_pc]
         if not def_ins then
-            return {code = ssa_data.name_of[read_version] or ("t" .. read_version), prec = PREC.PRIMARY}
+            return {code = ssa_data.name_of[version_id] or ("t" .. version_id), prec = PREC.PRIMARY}
         end
-        in_progress[read_version] = true
-        local res = render_def(def_ins, proto, expr_of, ssa_data, function(r, d)
-            -- для рекурсивного вызова get_read нужен контекст ssa_data
-            local rid = nil
-            -- Для текущей инструкции используем её read_at напрямую
-            -- Так как get_read вызывается только из render_def по конкретному def_ins,
-            -- то rid = ssa_data.read_at[def_ins.word_idx][r]
+        in_progress[version_id] = true
+        local res = render_def(def_ins, proto, ssa_data, function(r, d)
             local rad = ssa_data.read_at[def_ins.word_idx]
-            if rad then rid = rad[r] end
+            local rid = rad and rad[r]
             return get_read(r, d, rid)
         end, depth or 0)
-        in_progress[read_version] = nil
-        if res then expr_of[read_version] = res end
-        return res or {code = ssa_data.name_of[read_version] or ("t" .. read_version), prec = PREC.PRIMARY}
+        in_progress[version_id] = nil
+        if res then expr_of[version_id] = res end
+        return res or {code = ssa_data.name_of[version_id] or ("t" .. version_id), prec = PREC.PRIMARY}
     end
 
-    -- Проходим по всем версиям и вычисляем выражения
     for id, v in pairs(ssa_data.versions) do
         if inlineable[id] and v.def_pc and v.def_pc >= 0 then
             local def_ins = ins_at[v.def_pc]
             if def_ins then
-                local res = render_def(def_ins, proto, expr_of, ssa_data, function(r, d)
-                    local rad = ssa_data.read_at[def_ins.word_idx]
+                local rad = ssa_data.read_at[def_ins.word_idx]
+                local res = render_def(def_ins, proto, ssa_data, function(r, d)
                     local rid = rad and rad[r]
                     return get_read(r, d, rid)
                 end, 0)
@@ -310,6 +292,7 @@ function M.build(ssa_data, proto, instrs)
     return {
         expr_of = expr_of,
         inlineable = inlineable,
+        use_count = use_count,
         get = function(id)
             if not id then return nil end
             return expr_of[id]
