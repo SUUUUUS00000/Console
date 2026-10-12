@@ -332,7 +332,7 @@ local function extract_literals(src)
             local j = i
             while j <= n and src:sub(j, j):match("[%w_]") do j = j + 1 end
             local word = src:sub(i, j - 1)
-            if word == "true" or word == "false" then
+            if word == "true" or word == "false" or word == "nil" then
                 list[#list + 1] = word
             end
             i = j
@@ -369,6 +369,7 @@ local function parse_literal(tok)
     if s then return "string", s end
     if tok == "true" then return "boolean", true end
     if tok == "false" then return "boolean", false end
+    if tok == "nil" then return "nil", nil end
     local n = tonumber(tok)
     if n then return "number", n end
     return nil
@@ -445,6 +446,86 @@ local function patch_upvalue_all(fns, old_val, new_val, script)
     return total
 end
 
+local function resolve_script_closure(s)
+    if not s then return nil end
+
+    if typeof(getscriptclosure) == "function" then
+        local ok, fn = pcall(getscriptclosure, s)
+        if ok and type(fn) == "function" then return fn end
+    end
+
+    if typeof(getscriptfunction) == "function" then
+        local ok, fn = pcall(getscriptfunction, s)
+        if ok and type(fn) == "function" then return fn end
+    end
+
+    if typeof(getgc) == "function" then
+        local ok_gc, gc = pcall(getgc, false)
+        if not ok_gc or not gc then pcall(function() gc = getgc() end) end
+        if gc and type(gc) == "table" then
+            for _, obj in ipairs(gc) do
+                if type(obj) == "function" then
+                    local ok_env, env = pcall(getfenv, obj)
+                    if ok_env and type(env) == "table" and rawget(env, "script") == s then
+                        return obj
+                    end
+                end
+            end
+            local s_full = s:GetFullName()
+            local s_name = s.Name
+            for _, obj in ipairs(gc) do
+                if type(obj) == "function" then
+                    local ok_info, info = pcall(debug.getinfo, obj)
+                    if ok_info and info and info.source then
+                        local src = tostring(info.source)
+                        if src:find(s_full, 1, true) or src:find(s_name, 1, true) then
+                            return obj
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if typeof(getsenv) == "function" then
+        local ok_env, env = pcall(getsenv, s)
+        if ok_env and type(env) == "table" then
+            for _, v in pairs(env) do
+                if type(v) == "function" then
+                    return v
+                end
+            end
+        end
+    end
+
+    if typeof(getconnections) == "function" then
+        local search_roots = {s, s.Parent}
+        if s.Parent and s.Parent.Parent then
+            table.insert(search_roots, s.Parent.Parent)
+        end
+        for _, root_inst in ipairs(search_roots) do
+            pcall(function()
+                for _, desc in ipairs(root_inst:GetDescendants()) do
+                    if desc:IsA("GuiButton") then
+                        for _, sig in ipairs({desc.MouseButton1Down, desc.MouseButton1Click, desc.Activated}) do
+                            local ok_c, conns = pcall(getconnections, sig)
+                            if ok_c and conns then
+                                for _, conn in ipairs(conns) do
+                                    if type(conn.Function) == "function" then
+                                        return conn.Function
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end)
+        end
+    end
+
+    return nil
+end
+
 local function collect_all_functions(root_fn, script)
     local fns = {}
     local visited = {}
@@ -456,26 +537,28 @@ local function collect_all_functions(root_fn, script)
         end
     end
 
-    add_fn(root_fn)
+    if root_fn then
+        add_fn(root_fn)
 
-    local queue = {root_fn}
-    while #queue > 0 do
-        local fn = table.remove(queue, 1)
-        if type(fn) == "function" and typeof(debug.getprotos) == "function" then
-            local ok, protos = pcall(debug.getprotos, fn)
-            if ok and protos then
-                for i = 1, #protos do
-                    local ok2, actives = pcall(debug.getproto, fn, i, true)
-                    if ok2 and type(actives) == "table" then
-                        for _, f in ipairs(actives) do
-                            if type(f) == "function" and not visited[f] then
-                                add_fn(f)
-                                queue[#queue + 1] = f
+        local queue = {root_fn}
+        while #queue > 0 do
+            local fn = table.remove(queue, 1)
+            if type(fn) == "function" and typeof(debug.getprotos) == "function" then
+                local ok, protos = pcall(debug.getprotos, fn)
+                if ok and protos then
+                    for i = 1, #protos do
+                        local ok2, actives = pcall(debug.getproto, fn, i, true)
+                        if ok2 and type(actives) == "table" then
+                            for _, f in ipairs(actives) do
+                                if type(f) == "function" and not visited[f] then
+                                    add_fn(f)
+                                    queue[#queue + 1] = f
+                                end
                             end
+                        elseif ok2 and type(actives) == "function" and not visited[actives] then
+                            add_fn(actives)
+                            queue[#queue + 1] = actives
                         end
-                    elseif ok2 and type(actives) == "function" and not visited[actives] then
-                        add_fn(actives)
-                        queue[#queue + 1] = actives
                     end
                 end
             end
@@ -586,7 +669,7 @@ local function disconnect_old_script_connections(script)
         check_and_disconnect(sig)
     end
 
-    for _, target in ipairs(targets) do
+    for _, target in ipairs(search_roots) do
         pcall(function()
             for _, desc in ipairs(target:GetDescendants()) do
                 if desc:IsA("GuiButton") then
@@ -635,6 +718,7 @@ end
 
 local function strategy_hookproto(script, root_fn, new_fn)
     local C = console.colors()
+    if not root_fn then return false, "no root_fn for hookproto" end
     if typeof(hookproto) ~= "function" then return false, "no hookproto" end
 
     local ok_old, old_protos = pcall(debug.getprotos, root_fn)
@@ -694,41 +778,48 @@ end
 
 local function strategy_hookfunction(script, root_fn, new_fn)
     local C = console.colors()
-    if typeof(hookfunction) ~= "function" then return false, "no hookfunction" end
 
     disconnect_old_script_connections(script)
 
-    local ok_hook, prev = pcall(hookfunction, root_fn, new_fn)
-    if not ok_hook or not prev then
-        if typeof(newcclosure) == "function" then
-            local c_fn
-            pcall(function() c_fn = newcclosure(new_fn) end)
-            if c_fn then
-                ok_hook, prev = pcall(hookfunction, root_fn, c_fn)
+    local hooked = false
+    if root_fn and typeof(hookfunction) == "function" then
+        local ok_hook, prev = pcall(hookfunction, root_fn, new_fn)
+        if not ok_hook or not prev then
+            if typeof(newcclosure) == "function" then
+                local c_fn
+                pcall(function() c_fn = newcclosure(new_fn) end)
+                if c_fn then
+                    ok_hook, prev = pcall(hookfunction, root_fn, c_fn)
+                end
             end
         end
+        if ok_hook and prev then
+            hooked = true
+            active_hooks[script] = {
+                kind = "hookfunction",
+                prev = prev,
+                script = script,
+            }
+        end
     end
-    if not ok_hook or not prev then return false, "hookfunction failed: " .. tostring(prev) end
 
     local spawn_ok, spawn_err = pcall(function()
-        local co = coroutine.create(root_fn)
+        local co = coroutine.create(new_fn)
         local ok_run, run_err = coroutine.resume(co, script)
         if not ok_run then
             error(run_err)
         end
         task.wait(0.05)
     end)
+
     if not spawn_ok then
-        pcall(hookfunction, root_fn, prev)
-        active_hooks[script] = nil
+        if hooked and active_hooks[script] then
+            pcall(hookfunction, root_fn, active_hooks[script].prev)
+            active_hooks[script] = nil
+        end
         return false, "runtime error after hook: " .. tostring(spawn_err)
     end
 
-    active_hooks[script] = {
-        kind = "hookfunction",
-        prev = prev,
-        script = script,
-    }
     return true
 end
 
@@ -742,7 +833,7 @@ local function prepare_compiled_fn(fn, script, root_fn)
             if type(se) == "table" then s_env = se end
         end)
     end
-    if not next(s_env) and typeof(getfenv) == "function" then
+    if not next(s_env) and root_fn and typeof(getfenv) == "function" then
         pcall(function()
             local fe = getfenv(root_fn)
             if type(fe) == "table" then s_env = fe end
@@ -782,8 +873,7 @@ function M.apply_edit(script, new_bytes)
     local C = console.colors()
     local st = M.state
 
-    local root_fn = getscriptclosure(script)
-    if not root_fn then return false, "no closure" end
+    local root_fn = resolve_script_closure(script)
 
     if not st.original_src and st.baseline and decompile and decompile.decompile_best then
         pcall(function()
@@ -837,7 +927,7 @@ function M.apply_edit(script, new_bytes)
         end
     end
 
-    if not new_fn then
+    if not new_fn and root_fn then
         local info_ok, info = pcall(debug.getinfo, root_fn)
         local nups = (info_ok and info and info.nups) or 0
         if nups > 0 then
@@ -856,32 +946,29 @@ function M.apply_edit(script, new_bytes)
                 local ok_call, made = pcall(factory2, table.unpack(ups))
                 if ok_call and made then
                     new_fn = prepare_compiled_fn(made, script, root_fn)
-                else
-                    return false, "factory failed: " .. tostring(made)
                 end
-            else
-                return false, "compile: " .. tostring(load_err)
-                    .. " | factory: " .. tostring(wrap2_err)
             end
         end
     end
 
     if not new_fn then
-        return false, "compile error: " .. tostring(load_err)
+        return false, "compile error: " .. tostring(load_err or wrap_err)
     end
 
-    local ok_b, info_b = strategy_hookproto(script, root_fn, new_fn)
-    if ok_b then
-        console.log("apply: strategy B (hookproto) applied " .. tostring(info_b) .. " protos", C.ok)
-        last_applied = script
-        return true
-    else
-        console.log("apply: strategy B failed: " .. tostring(info_b), C.dim)
+    if root_fn then
+        local ok_b, info_b = strategy_hookproto(script, root_fn, new_fn)
+        if ok_b then
+            console.log("apply: strategy B (hookproto) applied " .. tostring(info_b) .. " protos", C.ok)
+            last_applied = script
+            return true
+        else
+            console.log("apply: strategy B failed: " .. tostring(info_b), C.dim)
+        end
     end
 
     local ok_c, err_c = strategy_hookfunction(script, root_fn, new_fn)
     if ok_c then
-        console.log("apply: strategy C (hookfunction + clean reload)", C.ok)
+        console.log("apply: strategy C (hookfunction / spawn clean reload)", C.ok)
         last_applied = script
         return true
     end
