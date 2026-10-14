@@ -321,14 +321,14 @@ local function extract_literals(src)
             end
             list[#list + 1] = src:sub(i, j - 1)
             i = j
-        elseif c:match("%d") or (c == "." and src:sub(i + 1, i + 1):match("%d")) then
+        elseif c:match("[%d]") or (c == "." and src:sub(i + 1, i + 1):match("[%d]")) then
             local j = i
             while j <= n and (src:sub(j, j):match("[%d%.]") or src:sub(j, j):match("[xXa-fA-F]")) do
                 j = j + 1
             end
             list[#list + 1] = src:sub(i, j - 1)
             i = j
-        elseif c:match("[a-zA-Z_]") then
+        elseif c:match("[%a_]") then
             local j = i
             while j <= n and src:sub(j, j):match("[%w_]") do j = j + 1 end
             local word = src:sub(i, j - 1)
@@ -364,7 +364,9 @@ local function diff_literals(old_src, new_src)
 end
 
 local function parse_literal(tok)
-    if not tok or tok == "" then return nil end
+    if not tok then return nil end
+    tok = tok:match("^%s*(.-)%s*$")
+    if tok == "" then return nil end
     local s = tok:match("^'(.*)'$") or tok:match('^"(.*)"$')
     if s then return "string", s end
     if tok == "true" then return "boolean", true end
@@ -446,6 +448,31 @@ local function patch_upvalue_all(fns, old_val, new_val, script)
     return total
 end
 
+local function inspect_instance_signals(inst, add_fn)
+    if not inst then return end
+    local signals = {}
+    if inst:IsA("GuiButton") then
+        table.insert(signals, inst.MouseButton1Down)
+        table.insert(signals, inst.MouseButton1Click)
+        table.insert(signals, inst.MouseButton1Up)
+        table.insert(signals, inst.Activated)
+    elseif inst:IsA("ProximityPrompt") then
+        table.insert(signals, inst.Triggered)
+    elseif inst:IsA("ClickDetector") then
+        table.insert(signals, inst.MouseClick)
+    end
+    for _, sig in ipairs(signals) do
+        local ok_c, conns = pcall(getconnections, sig)
+        if ok_c and conns then
+            for _, conn in ipairs(conns) do
+                if type(conn.Function) == "function" then
+                    add_fn(conn.Function)
+                end
+            end
+        end
+    end
+end
+
 local function resolve_script_closure(s)
     if not s then return nil end
 
@@ -504,22 +531,20 @@ local function resolve_script_closure(s)
             table.insert(search_roots, s.Parent.Parent)
         end
         for _, root_inst in ipairs(search_roots) do
+            local found_fn = nil
+            inspect_instance_signals(root_inst, function(f)
+                if not found_fn then found_fn = f end
+            end)
+            if found_fn then return found_fn end
             pcall(function()
                 for _, desc in ipairs(root_inst:GetDescendants()) do
-                    if desc:IsA("GuiButton") then
-                        for _, sig in ipairs({desc.MouseButton1Down, desc.MouseButton1Click, desc.Activated}) do
-                            local ok_c, conns = pcall(getconnections, sig)
-                            if ok_c and conns then
-                                for _, conn in ipairs(conns) do
-                                    if type(conn.Function) == "function" then
-                                        return conn.Function
-                                    end
-                                end
-                            end
-                        end
-                    end
+                    inspect_instance_signals(desc, function(f)
+                        if not found_fn then found_fn = f end
+                    end)
+                    if found_fn then break end
                 end
             end)
+            if found_fn then return found_fn end
         end
     end
 
@@ -604,27 +629,10 @@ local function collect_all_functions(root_fn, script)
             table.insert(search_roots, script.Parent.Parent)
         end
         for _, root_inst in ipairs(search_roots) do
+            inspect_instance_signals(root_inst, add_fn)
             pcall(function()
                 for _, desc in ipairs(root_inst:GetDescendants()) do
-                    local signals = {}
-                    if desc:IsA("GuiButton") then
-                        table.insert(signals, desc.MouseButton1Down)
-                        table.insert(signals, desc.MouseButton1Click)
-                        table.insert(signals, desc.MouseButton1Up)
-                        table.insert(signals, desc.Activated)
-                    elseif desc:IsA("ProximityPrompt") then
-                        table.insert(signals, desc.Triggered)
-                    end
-                    for _, sig in ipairs(signals) do
-                        local ok_conns, conns = pcall(getconnections, sig)
-                        if ok_conns and conns then
-                            for _, conn in ipairs(conns) do
-                                if type(conn.Function) == "function" and not visited[conn.Function] then
-                                    add_fn(conn.Function)
-                                end
-                            end
-                        end
-                    end
+                    inspect_instance_signals(desc, add_fn)
                 end
             end)
         end
@@ -651,15 +659,26 @@ local function disconnect_old_script_connections(script)
         if ok and conns then
             for _, conn in ipairs(conns) do
                 local fn = conn.Function
+                local should_disconnect = false
                 if type(fn) == "function" then
                     local info_ok, info = pcall(debug.getinfo, fn)
                     if info_ok and info and info.source then
                         local src = tostring(info.source)
                         if src:find(script.Name, 1, true) then
-                            pcall(function() conn:Disable() end)
-                            pcall(function() conn:Disconnect() end)
+                            should_disconnect = true
                         end
                     end
+                    local env_ok, env = pcall(getfenv, fn)
+                    if env_ok and type(env) == "table" and rawget(env, "script") == script then
+                        should_disconnect = true
+                    end
+                end
+                if not conn.ForeignState then
+                    should_disconnect = true
+                end
+                if should_disconnect then
+                    pcall(function() conn:Disable() end)
+                    pcall(function() conn:Disconnect() end)
                 end
             end
         end
@@ -669,17 +688,25 @@ local function disconnect_old_script_connections(script)
         check_and_disconnect(sig)
     end
 
+    local function process_signals(inst)
+        if not inst then return end
+        if inst:IsA("GuiButton") then
+            check_and_disconnect(inst.MouseButton1Down)
+            check_and_disconnect(inst.MouseButton1Click)
+            check_and_disconnect(inst.MouseButton1Up)
+            check_and_disconnect(inst.Activated)
+        elseif inst:IsA("ProximityPrompt") then
+            check_and_disconnect(inst.Triggered)
+        elseif inst:IsA("ClickDetector") then
+            check_and_disconnect(inst.MouseClick)
+        end
+    end
+
     for _, target in ipairs(search_roots) do
+        process_signals(target)
         pcall(function()
             for _, desc in ipairs(target:GetDescendants()) do
-                if desc:IsA("GuiButton") then
-                    check_and_disconnect(desc.MouseButton1Down)
-                    check_and_disconnect(desc.MouseButton1Click)
-                    check_and_disconnect(desc.MouseButton1Up)
-                    check_and_disconnect(desc.Activated)
-                elseif desc:IsA("ProximityPrompt") then
-                    check_and_disconnect(desc.Triggered)
-                end
+                process_signals(desc)
             end
         end)
     end
@@ -968,7 +995,7 @@ function M.apply_edit(script, new_bytes)
 
     local ok_c, err_c = strategy_hookfunction(script, root_fn, new_fn)
     if ok_c then
-        console.log("apply: strategy C (hookfunction / spawn clean reload)", C.ok)
+        console.log("apply: strategy C (hookfunction / clean reload)", C.ok)
         last_applied = script
         return true
     end
